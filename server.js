@@ -15,6 +15,7 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const APP_ROOT = fs.existsSync(path.join(__dirname, 'index.html')) ? __dirname : path.join(__dirname, '..');
 app.use(express.json());
 app.use(express.static(APP_ROOT));
+app.get('/', (req, res) => res.sendFile(path.join(APP_ROOT, 'index.html')));
 app.get(['/login', '/register', '/forgot-password'], (req, res) => res.sendFile(path.join(APP_ROOT, 'auth.html')));
 app.get('/book/:slug', (req, res) => res.sendFile(path.join(APP_ROOT, 'booking.html')));
 
