@@ -52,6 +52,40 @@ function httpsRequest(url, options, body) { return new Promise((resolve, reject)
 async function refreshGoogleToken(userId, token) { if (!token?.refresh_token) return token; const body = querystring.stringify({ client_id: config.googleClientId, client_secret: config.googleClientSecret, refresh_token: token.refresh_token, grant_type: 'refresh_token' }); const refreshed = await httpsRequest('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } }, body); if (refreshed.status >= 400) return token; const next = { ...token, ...refreshed.body, refresh_token: token.refresh_token, received_at: Date.now() }; googleTokens.set(userId, next); db.saveOAuthToken(userId, 'google', next, config.tokenEncryptionKey); return next; }
 async function googleCalendarRequest(userId, url) { let token = googleTokens.get(userId) || db.getOAuthToken(userId, 'google', config.tokenEncryptionKey); if (!token?.access_token) return null; if (!token.received_at) { token.received_at = Date.now(); db.saveOAuthToken(userId, 'google', token, config.tokenEncryptionKey); } if (token.expires_in && Date.now() > token.received_at + (token.expires_in - 60) * 1000) token = await refreshGoogleToken(userId, token); googleTokens.set(userId, token); return httpsRequest(url, { headers: { Authorization: `Bearer ${token.access_token}` } }); }
 
+app.use(async (req, res, next) => {
+  if (!config.useSupabase || req.method === 'GET') return next();
+  const client = require('./supabase/client');
+  try {
+    const owner = await supabaseState.ownerProfile();
+    if (!owner?.id) return res.status(503).json({ error: 'No Supabase scheduling profile is configured.' });
+    if (req.path === '/api/profile' && req.method === 'PUT') {
+      if (!currentUser(req)) return res.status(401).json({ error: 'Authentication required.' });
+      const body = req.body || {};
+      const rows = await client.update('profiles', { name: body.name, photo: body.photo, bio: body.bio, job_title: body.title || body.job_title, timezone: body.timezone, slug: body.slug }, `?id=eq.${encodeURIComponent(owner.id)}`);
+      return res.json(rows[0] || body);
+    }
+    if (req.path === '/api/availability' && req.method === 'PUT') {
+      if (!currentUser(req)) return res.status(401).json({ error: 'Authentication required.' });
+      const body = req.body || {};
+      await client.remove('availability_rules', `?owner_id=eq.${encodeURIComponent(owner.id)}`);
+      for (const [day, hours] of Object.entries(body)) {
+        if (!/^\d{2}:\d{2}[–-]\d{2}:\d{2}$/.test(String(hours))) continue;
+        const [start_time, end_time] = String(hours).split(/[–-]/);
+        const day_of_week = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'].indexOf(day);
+        if (day_of_week >= 0) await client.insert('availability_rules', { owner_id: owner.id, day_of_week, start_time, end_time, label: null, enabled: true });
+      }
+      return res.json(body);
+    }
+    if (req.path === '/api/meeting-types' && req.method === 'POST') {
+      if (!currentUser(req)) return res.status(401).json({ error: 'Authentication required.' });
+      const body = req.body || {};
+      const rows = await client.insert('meeting_types', { owner_id: owner.id, name_ar: body.name || 'اجتماع جديد', name_en: body.en || 'New meeting', duration_minutes: Number(body.duration) || 30, color: body.color || '#2166f3', mode: body.mode || 'Google Meet' });
+      const row = rows[0];
+      return res.status(201).json({ id: row.id, supabaseId: row.id, name: row.name_ar, en: row.name_en, duration: row.duration_minutes, color: row.color, mode: row.mode });
+    }
+    next();
+  } catch (error) { return res.status(503).json({ error: 'Unable to save data to Supabase.', detail: error.message }); }
+});
 app.get('/api/state', async (req, res) => { try { if (config.useSupabase) { const d = await supabaseState.publicState(); if (!currentUser(req)) return res.json(d); return res.json({ ...d, bookings: [] }); } const d = readData(); if (!currentUser(req)) return res.json({ profile: d.profile, meetingTypes: d.meetingTypes, availability: d.availability, integrations: d.integrations, bookings: [] }); res.json(d); } catch (error) { res.status(503).json({ error: 'Supabase state is unavailable.', detail: error.message }); } });
 app.get('/api/health', (req, res) => { const d = readData(); res.json({ status: 'ok', service: 'calpro', database: 'connected', googleCalendar: Boolean(d.integrations?.googleCalendar), timestamp: new Date().toISOString() }); });
 app.get('/api/public/:slug', (req, res) => { const d = readData(); const slug = d.profile.slug || 'ahmed'; if (req.params.slug !== slug) return res.status(404).json({ error: 'Scheduling profile not found.' }); res.json({ slug, profile: d.profile, meetingTypes: d.meetingTypes, availability: d.availability, timezone: d.profile.timezone }); });
