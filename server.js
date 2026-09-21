@@ -58,6 +58,27 @@ app.use(async (req, res, next) => {
   try {
     const owner = await supabaseState.ownerProfile();
     if (!owner?.id) return res.status(503).json({ error: 'No Supabase scheduling profile is configured.' });
+    if (req.path === '/api/auth/register' && req.method === 'POST') {
+      const { email, password, name } = req.body || {};
+      if (!email || !password || !name) return res.status(400).json({ error: 'Name, email, and password are required.' });
+      const auth = await client.authRequest('signup', { email, password, data: { name } });
+      return res.status(201).json({ id: auth.user?.id, email: auth.user?.email || email, name });
+    }
+    if (req.path === '/api/auth/login' && req.method === 'POST') {
+      const { email, password } = req.body || {};
+      if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+      const auth = await client.authRequest('token?grant_type=password', { email, password });
+      const userId = auth.user?.id;
+      if (!userId) return res.status(401).json({ error: 'Invalid email or password.' });
+      const token = sessionToken(userId); sessions.set(token, userId);
+      res.setHeader('Set-Cookie', `calpro_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`);
+      return res.json({ ok: true, user: { id: userId, email: auth.user.email, name: auth.user.user_metadata?.name || auth.user.email } });
+    }
+    if (req.path === '/api/auth/me' && req.method === 'GET') {
+      const userId = currentUser(req); if (!userId) return res.status(401).json({ error: 'Authentication required.' });
+      const profile = await client.list('profiles', `?id=eq.${encodeURIComponent(userId)}&select=*`);
+      return res.json({ user: { id: userId, email: profile[0]?.email || '', name: profile[0]?.name || '' }, profile: profile[0] || null });
+    }
     if (req.path === '/api/profile' && req.method === 'PUT') {
       if (!currentUser(req)) return res.status(401).json({ error: 'Authentication required.' });
       const body = req.body || {};

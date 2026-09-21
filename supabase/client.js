@@ -6,6 +6,12 @@ function supabaseConfig() {
   if (!url || !key) throw new Error('Supabase server configuration is missing.');
   return { url: url.replace(/\/$/, ''), key };
 }
+function supabaseAuthConfig() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) throw new Error('Supabase Auth configuration is missing.');
+  return { url: url.replace(/\/$/, ''), key };
+}
 
 async function request(table, options = {}) {
   const { url, key } = supabaseConfig();
@@ -22,5 +28,13 @@ const list = (table, query = '?select=*') => request(table, { query });
 const insert = (table, values) => request(table, { method: 'POST', query: '?select=*', headers: { Prefer: 'return=representation' }, body: JSON.stringify(values) });
 const update = (table, values, query) => request(table, { method: 'PATCH', query, headers: { Prefer: 'return=representation' }, body: JSON.stringify(values) });
 const remove = (table, query) => request(table, { method: 'DELETE', query, headers: { Prefer: 'return=representation' } });
+async function authRequest(path, values) {
+  const { url, key } = supabaseAuthConfig();
+  const response = await fetch(`${url}/auth/v1/${path}`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
+  const text = await response.text();
+  let body = null; try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) throw new Error(body?.msg || body?.message || body?.error_description || 'Supabase Auth request failed.');
+  return body;
+}
 
-module.exports = { request, list, insert, update, remove };
+module.exports = { request, list, insert, update, remove, authRequest };
