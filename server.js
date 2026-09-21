@@ -56,12 +56,13 @@ app.use(async (req, res, next) => {
   if (!config.useSupabase || req.method === 'GET') return next();
   const client = require('./supabase/client');
   try {
-    const owner = await supabaseState.ownerProfile();
-    if (!owner?.id) return res.status(503).json({ error: 'No Supabase scheduling profile is configured.' });
+    const authPath = req.path.startsWith('/api/auth/');
+    const owner = authPath ? null : await supabaseState.ownerProfile();
     if (req.path === '/api/auth/register' && req.method === 'POST') {
       const { email, password, name } = req.body || {};
       if (!email || !password || !name) return res.status(400).json({ error: 'Name, email, and password are required.' });
       const auth = await client.authRequest('signup', { email, password, data: { name } });
+      if (auth.user?.id) await client.insert('profiles', { id: auth.user.id, name, timezone: 'Asia/Riyadh', slug: `${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'user'}-${String(auth.user.id).slice(0, 8)}` });
       return res.status(201).json({ id: auth.user?.id, email: auth.user?.email || email, name });
     }
     if (req.path === '/api/auth/login' && req.method === 'POST') {
@@ -79,6 +80,7 @@ app.use(async (req, res, next) => {
       const profile = await client.list('profiles', `?id=eq.${encodeURIComponent(userId)}&select=*`);
       return res.json({ user: { id: userId, email: profile[0]?.email || '', name: profile[0]?.name || '' }, profile: profile[0] || null });
     }
+    if (!owner?.id) return res.status(503).json({ error: 'No Supabase scheduling profile is configured.' });
     if (req.path === '/api/profile' && req.method === 'PUT') {
       if (!currentUser(req)) return res.status(401).json({ error: 'Authentication required.' });
       const body = req.body || {};
