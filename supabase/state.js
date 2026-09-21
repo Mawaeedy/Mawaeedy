@@ -47,4 +47,9 @@ async function publicState() {
   };
 }
 
-module.exports = { publicState };
+async function ownerProfile() {
+  const rows = await supabase.list('profiles', '?select=id&limit=1');
+  return rows[0] || null;
+}
+
+module.exports = { publicState, ownerProfile };

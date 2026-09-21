@@ -21,5 +21,6 @@ async function request(table, options = {}) {
 const list = (table, query = '?select=*') => request(table, { query });
 const insert = (table, values) => request(table, { method: 'POST', query: '?select=*', headers: { Prefer: 'return=representation' }, body: JSON.stringify(values) });
 const update = (table, values, query) => request(table, { method: 'PATCH', query, headers: { Prefer: 'return=representation' }, body: JSON.stringify(values) });
+const remove = (table, query) => request(table, { method: 'DELETE', query, headers: { Prefer: 'return=representation' } });
 
-module.exports = { request, list, insert, update };
+module.exports = { request, list, insert, update, remove };
