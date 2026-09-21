@@ -24,7 +24,7 @@ app.get('/book/:slug', (req, res) => res.sendFile(path.join(APP_ROOT, 'booking.h
 const seed = {
   users: [{ id: 'owner', email: 'ahmed@example.com', password: 'demo', name: 'أحمد الشمري' }],
   profile: { name: 'أحمد الشمري', title: 'Product Manager', location: 'Riyadh, Saudi Arabia', bio: 'أساعد الفرق على بناء منتجات أفضل.', photo: '👨🏻‍💼', timezone: 'Asia/Riyadh' },
-  integrations: { googleCalendar: true, googleMeet: true, outlook: false, zoom: true },
+  integrations: { googleCalendar: false, googleMeet: false, outlook: false, zoom: false },
   meetingTypes: [
     { id: 'intro', name: 'استشارة عبر الفيديو', en: 'Intro video call', duration: 30, color: '#2166f3', mode: 'Google Meet' },
     { id: 'strategy', name: 'جلسة استراتيجية', en: 'Strategy session', duration: 60, color: '#15a66b', mode: 'Zoom' }
