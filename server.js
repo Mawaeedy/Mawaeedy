@@ -6,6 +6,7 @@ const https = require('https');
 const querystring = require('querystring');
 const config = require('./config');
 const crypto = require('crypto');
+const supabaseState = require('./supabase/state');
 
 const app = express();
 const sessions = new Map();
@@ -51,7 +52,7 @@ function httpsRequest(url, options, body) { return new Promise((resolve, reject)
 async function refreshGoogleToken(userId, token) { if (!token?.refresh_token) return token; const body = querystring.stringify({ client_id: config.googleClientId, client_secret: config.googleClientSecret, refresh_token: token.refresh_token, grant_type: 'refresh_token' }); const refreshed = await httpsRequest('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } }, body); if (refreshed.status >= 400) return token; const next = { ...token, ...refreshed.body, refresh_token: token.refresh_token, received_at: Date.now() }; googleTokens.set(userId, next); db.saveOAuthToken(userId, 'google', next, config.tokenEncryptionKey); return next; }
 async function googleCalendarRequest(userId, url) { let token = googleTokens.get(userId) || db.getOAuthToken(userId, 'google', config.tokenEncryptionKey); if (!token?.access_token) return null; if (!token.received_at) { token.received_at = Date.now(); db.saveOAuthToken(userId, 'google', token, config.tokenEncryptionKey); } if (token.expires_in && Date.now() > token.received_at + (token.expires_in - 60) * 1000) token = await refreshGoogleToken(userId, token); googleTokens.set(userId, token); return httpsRequest(url, { headers: { Authorization: `Bearer ${token.access_token}` } }); }
 
-app.get('/api/state', (req, res) => { const d = readData(); if (!currentUser(req)) return res.json({ profile: d.profile, meetingTypes: d.meetingTypes, availability: d.availability, integrations: d.integrations, bookings: [] }); res.json(d); });
+app.get('/api/state', async (req, res) => { try { if (config.useSupabase) { const d = await supabaseState.publicState(); if (!currentUser(req)) return res.json(d); return res.json({ ...d, bookings: [] }); } const d = readData(); if (!currentUser(req)) return res.json({ profile: d.profile, meetingTypes: d.meetingTypes, availability: d.availability, integrations: d.integrations, bookings: [] }); res.json(d); } catch (error) { res.status(503).json({ error: 'Supabase state is unavailable.', detail: error.message }); } });
 app.get('/api/health', (req, res) => { const d = readData(); res.json({ status: 'ok', service: 'calpro', database: 'connected', googleCalendar: Boolean(d.integrations?.googleCalendar), timestamp: new Date().toISOString() }); });
 app.get('/api/public/:slug', (req, res) => { const d = readData(); const slug = d.profile.slug || 'ahmed'; if (req.params.slug !== slug) return res.status(404).json({ error: 'Scheduling profile not found.' }); res.json({ slug, profile: d.profile, meetingTypes: d.meetingTypes, availability: d.availability, timezone: d.profile.timezone }); });
 app.get('/api/team', requireAuth, (req, res) => { const d = readData(); res.json(d.teamMembers || []); });
