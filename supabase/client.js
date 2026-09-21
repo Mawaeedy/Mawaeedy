@@ -36,5 +36,12 @@ async function authRequest(path, values) {
   if (!response.ok) throw new Error(body?.msg || body?.message || body?.error_description || 'Supabase Auth request failed.');
   return body;
 }
+async function authExchange(code) {
+  const { url, key } = supabaseAuthConfig();
+  const response = await fetch(`${url}/auth/v1/token?grant_type=authorization_code`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify({ auth_code: code }) });
+  const text = await response.text(); let body = null; try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) throw new Error(body?.msg || body?.message || 'Supabase OAuth exchange failed.');
+  return body;
+}
 
-module.exports = { request, list, insert, update, remove, authRequest };
+module.exports = { request, list, insert, update, remove, authRequest, authExchange, supabaseAuthConfig };

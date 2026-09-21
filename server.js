@@ -53,11 +53,26 @@ async function refreshGoogleToken(userId, token) { if (!token?.refresh_token) re
 async function googleCalendarRequest(userId, url) { let token = googleTokens.get(userId) || db.getOAuthToken(userId, 'google', config.tokenEncryptionKey); if (!token?.access_token) return null; if (!token.received_at) { token.received_at = Date.now(); db.saveOAuthToken(userId, 'google', token, config.tokenEncryptionKey); } if (token.expires_in && Date.now() > token.received_at + (token.expires_in - 60) * 1000) token = await refreshGoogleToken(userId, token); googleTokens.set(userId, token); return httpsRequest(url, { headers: { Authorization: `Bearer ${token.access_token}` } }); }
 
 app.use(async (req, res, next) => {
-  if (!config.useSupabase || req.method === 'GET') return next();
+  if (!config.useSupabase || (req.method === 'GET' && !['/api/auth/google', '/api/auth/google/callback'].includes(req.path))) return next();
   const client = require('./supabase/client');
   try {
     const authPath = req.path.startsWith('/api/auth/');
     const owner = authPath ? null : await supabaseState.ownerProfile();
+    if (config.useSupabase && req.path === '/api/auth/google' && req.method === 'GET') {
+      const redirectTo = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+      const { url } = client.supabaseAuthConfig();
+      return res.redirect(`${url}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`);
+    }
+    if (config.useSupabase && req.path === '/api/auth/google/callback' && req.method === 'GET') {
+      if (!req.query.code) return res.status(400).send('Missing Supabase OAuth code.');
+      const auth = await client.authExchange(req.query.code);
+      if (!auth.user?.id) return res.status(502).send('Google sign-in did not return a user.');
+      const token = sessionToken(auth.user.id); sessions.set(token, auth.user.id);
+      const existing = await client.list('profiles', `?id=eq.${encodeURIComponent(auth.user.id)}&select=id`);
+      if (!existing.length) await client.insert('profiles', { id: auth.user.id, name: auth.user.user_metadata?.full_name || auth.user.email || 'Mawaeedy user', timezone: 'Asia/Riyadh' });
+      res.setHeader('Set-Cookie', `calpro_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`);
+      return res.redirect('/');
+    }
     if (req.path === '/api/auth/register' && req.method === 'POST') {
       const { email, password, name } = req.body || {};
       if (!email || !password || !name) return res.status(400).json({ error: 'Name, email, and password are required.' });
