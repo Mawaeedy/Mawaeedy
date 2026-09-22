@@ -28,6 +28,7 @@ const list = (table, query = '?select=*') => request(table, { query });
 const insert = (table, values) => request(table, { method: 'POST', query: '?select=*', headers: { Prefer: 'return=representation' }, body: JSON.stringify(values) });
 const update = (table, values, query) => request(table, { method: 'PATCH', query, headers: { Prefer: 'return=representation' }, body: JSON.stringify(values) });
 const remove = (table, query) => request(table, { method: 'DELETE', query, headers: { Prefer: 'return=representation' } });
+const rpc = (functionName, values) => request(`rpc/${encodeURIComponent(functionName)}`, { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(values) });
 async function authRequest(path, values) {
   const { url, key } = supabaseAuthConfig();
   const response = await fetch(`${url}/auth/v1/${path}`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
@@ -44,4 +45,4 @@ async function authExchange(code) {
   return body;
 }
 
-module.exports = { request, list, insert, update, remove, authRequest, authExchange, supabaseAuthConfig };
+module.exports = { request, list, insert, update, remove, rpc, authRequest, authExchange, supabaseAuthConfig };

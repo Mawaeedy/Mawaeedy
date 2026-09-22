@@ -2,3 +2,4 @@
 calpro.sqlite
 data.json
 node_modules/
+supabase/.temp/

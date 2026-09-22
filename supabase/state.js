@@ -9,14 +9,22 @@ function dayName(day) {
   return ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][Number(day)] || String(day);
 }
 
-async function publicState() {
+function eq(column, value) {
+  return `${column}=eq.${encodeURIComponent(value)}`;
+}
+
+async function publicState(ownerId = null, slug = null) {
+  const profileFilter = ownerId ? `?select=*&${eq('id', ownerId)}&limit=1` : slug ? `?select=*&${eq('slug', slug)}&limit=1` : '?select=*&limit=1';
+  const profileRows = await supabase.list('profiles', profileFilter);
+  const profile = profileRows[0] || {};
+  if (!profile.id) return { profile: {}, meetingTypes: [], availability: {}, integrations: {}, bookings: [] };
+  const ownerFilter = eq('owner_id', profile.id);
   const [profiles, types, availability, integrations] = await Promise.all([
-    supabase.list('profiles', '?select=*&limit=1'),
-    supabase.list('meeting_types', '?select=*&order=created_at.asc'),
-    supabase.list('availability_rules', '?select=*&enabled=eq.true&order=day_of_week.asc'),
-    supabase.list('integrations', '?select=*')
+    Promise.resolve([profile]),
+    supabase.list('meeting_types', `?select=*&${ownerFilter}&active=eq.true&order=created_at.asc`),
+    supabase.list('availability_rules', `?select=*&${ownerFilter}&enabled=eq.true&order=day_of_week.asc`),
+    supabase.list('integrations', `?select=*&${ownerFilter}`)
   ]);
-  const profile = profiles[0] || {};
   const meetingTypes = types.map((item, index) => ({
     id: item.legacy_id || item.id || `meeting-${index + 1}`,
     supabaseId: item.id,
@@ -47,8 +55,9 @@ async function publicState() {
   };
 }
 
-async function ownerProfile() {
-  const rows = await supabase.list('profiles', '?select=id&limit=1');
+async function ownerProfile(userId) {
+  const query = userId ? `?select=id&${eq('id', userId)}&limit=1` : '?select=id&limit=1';
+  const rows = await supabase.list('profiles', query);
   return rows[0] || null;
 }
 
