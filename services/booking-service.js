@@ -21,7 +21,19 @@ function createBookingService(repository) {
     async createPublicBooking(input) {
       const normalized = normalizePublicBookingInput(input);
       if (typeof repository.createPublicBooking !== 'function') throw new BookingOperationUnavailableError('Public booking creation is unavailable.');
-      return repository.createPublicBooking(normalized);
+      return repository.createPublicBooking({ ...normalized, manageTokenHash: input.manageTokenHash });
+    },
+    async getGuestBooking(bookingId, manageTokenHash) {
+      if (typeof repository.getGuestBooking !== 'function') throw new BookingOperationUnavailableError('Guest booking management is unavailable.');
+      return repository.getGuestBooking(bookingId, manageTokenHash);
+    },
+    async cancelGuestBooking(bookingId, input = {}) {
+      if (typeof repository.cancelGuestBooking !== 'function') throw new BookingOperationUnavailableError('Guest cancellation is unavailable.');
+      return repository.cancelGuestBooking(bookingId, input);
+    },
+    async rescheduleGuestBooking(bookingId, input = {}) {
+      if (typeof repository.rescheduleGuestBooking !== 'function') throw new BookingOperationUnavailableError('Guest rescheduling is unavailable.');
+      return repository.rescheduleGuestBooking(bookingId, input);
     },
     async cancelBooking(ownerId, bookingId, input = {}) {
       if (!ownerId) throw new Error('Authenticated owner id is required.');

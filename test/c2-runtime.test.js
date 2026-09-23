@@ -27,10 +27,11 @@ test('Supabase public booking creation calls only the atomic RPC', async () => {
       return [{ id: 'booking-1', owner_id: 'owner-1', meeting_type_id: 'meeting-type-1', guest_name: 'Guest Name', guest_email: 'guest@example.com', starts_at: '2026-10-01T06:00:00.000Z', ends_at: '2026-10-01T06:30:00.000Z', status: 'confirmed', created_at: '2026-09-30T00:00:00.000Z' }];
     }
   });
-  const booking = await repository.createPublicBooking(publicInput());
+  const booking = await repository.createPublicBooking({ ...publicInput(), manageTokenHash: 'a'.repeat(64) });
   assert.equal(booking.id, 'booking-1');
-  assert.equal(calls[0][1], 'create_booking_atomically');
+  assert.equal(calls[0][1], 'create_booking_with_management_atomically');
   assert.equal(calls[0][2].p_idempotency_key, 'attempt-1234567890');
+  assert.equal(calls[0][2].p_manage_token_hash, 'a'.repeat(64));
 });
 
 test('production booking source has no direct Supabase bookings insert or client-controlled canonical fields', () => {
@@ -54,7 +55,7 @@ test('server-side timezone resolution accepts Riyadh and rejects DST gaps/ambigu
 test('browser booking attempt creates a key and sends only guest scheduling inputs', () => {
   const app = fs.readFileSync('app.js', 'utf8');
   assert.match(app, /newBookingAttemptKey/);
-  assert.match(app, /idempotencyKey:newBookingAttemptKey\(\)/);
+  assert.match(app, /idempotencyKey:key/);
   assert.match(app, /profileSlug:location\.pathname/);
   assert.doesNotMatch(app, /owner_id\s*:/i);
   assert.doesNotMatch(app, /occupied_(?:starts|ends)_at\s*:/i);

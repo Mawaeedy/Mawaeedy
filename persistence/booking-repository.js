@@ -45,11 +45,11 @@ function createSqliteBookingRepository(db) {
     capabilities: { atomicCreate: false, atomicCancel: false, atomicReschedule: false },
     async getBooking(ownerId, bookingId) {
       const state = db.read();
-      return legacyToCanonical((state.bookings || []).find(row => String(row.id) === String(bookingId)), ownerId);
+      return legacyToCanonical((state.bookings || []).find(row => String(row.id) === String(bookingId) && String(row.owner_id || ownerId) === String(ownerId)), ownerId);
     },
     async listOwnerBookings(ownerId) {
       const state = db.read();
-      return (state.bookings || []).map(row => legacyToCanonical(row, ownerId));
+      return (state.bookings || []).filter(row => String(row.owner_id || ownerId) === String(ownerId)).map(row => legacyToCanonical(row, ownerId));
     },
     async createBooking(ownerId, input) {
       const booking = normalizeBookingInput({ ...input, ownerId });
@@ -91,7 +91,7 @@ function createSqliteBookingRepository(db) {
 function createSupabaseBookingRepository(client) {
   return {
     backend: 'supabase',
-    capabilities: { atomicCreate: true, atomicCancel: false, atomicReschedule: false },
+    capabilities: { atomicCreate: true, atomicCancel: true, atomicReschedule: true },
     async getBooking(ownerId, bookingId) {
       const rows = await client.list('bookings', `?${ownerFilter(ownerId)}&id=eq.${encodeURIComponent(bookingId)}&select=*&limit=1`);
       return rows[0] ? mapBooking(rows[0], ownerId) : null;
@@ -105,7 +105,9 @@ function createSupabaseBookingRepository(client) {
     },
     async createPublicBooking(input) {
       const normalized = normalizePublicBookingInput(input);
-      const rows = await client.rpc('create_booking_atomically', {
+      const manageTokenHash = String(input.manageTokenHash || input.manage_token_hash || '');
+      if (!/^[a-f0-9]{64}$/.test(manageTokenHash)) throw new Error('Management credential is invalid.');
+      const rows = await client.rpc('create_booking_with_management_atomically', {
         p_profile_slug: normalized.profile_slug,
         p_meeting_type_id: normalized.meeting_type_id,
         p_requested_local: normalized.requested_local,
@@ -115,16 +117,50 @@ function createSupabaseBookingRepository(client) {
         p_guest_email: normalized.guest_email,
         p_guest_phone: normalized.guest_phone,
         p_notes: normalized.notes,
-        p_idempotency_key: normalized.idempotency_key
+        p_idempotency_key: normalized.idempotency_key,
+        p_manage_token_hash: manageTokenHash
       });
       const row = Array.isArray(rows) ? rows[0] : rows;
       return row ? mapBooking(row, row.owner_id) : null;
     },
-    async cancelBooking() {
-      throw new BookingOperationUnavailableError('Supabase booking cancellation requires the C2 atomic booking design.');
+    async getGuestBooking(bookingId, manageTokenHash) {
+      const result = await client.rpc('get_guest_booking_details', {
+        p_booking_id: bookingId,
+        p_manage_token_hash: manageTokenHash
+      });
+      return Array.isArray(result) ? result[0] || null : result;
     },
-    async rescheduleBooking() {
-      throw new BookingOperationUnavailableError('Supabase booking rescheduling requires the C2 atomic booking design.');
+    async cancelBooking(ownerId, bookingId, input = {}) {
+      const result = await client.rpc('cancel_booking_atomically', {
+        p_booking_id: bookingId,
+        p_actor_type: input.actorType || 'host',
+        p_owner_id: ownerId,
+        p_manage_token_hash: input.manageTokenHash || null,
+        p_cancellation_reason: input.reason ?? null,
+        p_operation_key: input.operationKey
+      });
+      const row = Array.isArray(result) ? result[0] : result;
+      return row ? mapBooking(row, ownerId) : null;
+    },
+    async cancelGuestBooking(bookingId, input = {}) {
+      return this.cancelBooking(null, bookingId, { ...input, actorType: 'guest' });
+    },
+    async rescheduleBooking(ownerId, bookingId, input = {}) {
+      const result = await client.rpc('reschedule_booking_atomically', {
+        p_booking_id: bookingId,
+        p_actor_type: input.actorType || 'host',
+        p_owner_id: ownerId,
+        p_manage_token_hash: input.manageTokenHash || null,
+        p_requested_local: input.requestedLocal,
+        p_requested_offset_minutes: Number(input.requestedOffsetMinutes),
+        p_requested_timezone: input.requestedTimezone,
+        p_operation_key: input.operationKey
+      });
+      const row = Array.isArray(result) ? result[0] : result;
+      return row ? mapBooking(row, ownerId) : null;
+    },
+    async rescheduleGuestBooking(bookingId, input = {}) {
+      return this.rescheduleBooking(null, bookingId, { ...input, actorType: 'guest' });
     }
   };
 }

@@ -13,6 +13,8 @@ const { createBookingService } = require('./services/booking-service');
 const { BookingValidationError } = require('./core/booking');
 const { resolveLocalWallClock } = require('./core/timezone');
 const { normalizeIntervals } = require('./core/validation');
+const { deriveManageToken, hashManageToken } = require('./core/manage-token');
+const { createPkcePair, pkceVerifierCookie, clearPkceVerifierCookie } = require('./core/supabase-oauth');
 
 const app = express();
 const sessions = new Map();
@@ -30,6 +32,7 @@ app.use(express.static(APP_ROOT));
 app.get('/', (req, res) => res.sendFile(path.join(APP_ROOT, 'index.html')));
 app.get(['/login', '/register', '/forgot-password'], (req, res) => res.sendFile(path.join(APP_ROOT, 'auth.html')));
 app.get('/book/:slug', (req, res) => res.sendFile(path.join(APP_ROOT, 'booking.html')));
+app.get('/manage/:bookingId', (req, res) => res.sendFile(path.join(APP_ROOT, 'booking.html')));
 
 const seed = {
   users: [{ id: 'owner', email: 'ahmed@example.com', password: 'demo', name: 'أحمد الشمري' }],
@@ -70,7 +73,37 @@ function sendBookingError(res, error) {
   }
   return res.status(503).json({ error: 'BOOKING_FAILED' });
 }
-function publicBookingResponse(booking, meetingType, timezone) {
+const lifecycleErrors = new Set(['BOOKING_NOT_FOUND', 'UNAUTHORIZED_BOOKING_ACCESS', 'INVALID_MANAGE_TOKEN', 'INVALID_BOOKING_STATE', 'IDEMPOTENCY_CONFLICT', 'INVALID_LOCAL_TIME', 'OUTSIDE_AVAILABILITY', 'DATE_UNAVAILABLE', 'TOO_SOON', 'BEYOND_BOOKING_HORIZON', 'SLOT_TAKEN', 'INVALID_TIMEZONE', 'INACTIVE_MEETING_TYPE', 'INVALID_INPUT', 'OVERRIDE_CONFLICT', 'OVERRIDE_NOT_FOUND', 'SCHEDULE_NOT_FOUND']);
+function lifecycleErrorCategory(error) {
+  const message = String(error?.supabase?.message || error?.message || '');
+  return [...lifecycleErrors].find(category => new RegExp(`(?:^|[^A-Z_])${category}(?:$|[^A-Z_])`).test(message)) || null;
+}
+function sendLifecycleError(res, error) {
+  const category = lifecycleErrorCategory(error);
+  if (!category) return res.status(503).json({ error: 'BOOKING_LIFECYCLE_FAILED' });
+  const status = ['SLOT_TAKEN', 'OUTSIDE_AVAILABILITY', 'DATE_UNAVAILABLE', 'TOO_SOON', 'BEYOND_BOOKING_HORIZON', 'IDEMPOTENCY_CONFLICT', 'INVALID_BOOKING_STATE', 'OVERRIDE_CONFLICT'].includes(category) ? 409
+    : ['BOOKING_NOT_FOUND', 'INACTIVE_MEETING_TYPE', 'OVERRIDE_NOT_FOUND', 'SCHEDULE_NOT_FOUND'].includes(category) ? 404
+    : ['INVALID_MANAGE_TOKEN', 'UNAUTHORIZED_BOOKING_ACCESS'].includes(category) ? 404 : 400;
+  return res.status(status).json({ error: category });
+}
+function operationKey(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(value) ? value : null; }
+function bookingView(booking, meetingTypes = [], timezone = 'UTC') {
+  if (!booking) return null;
+  const startsAt = new Date(booking.starts_at);
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(startsAt).reduce((out, part) => { if (part.type !== 'literal') out[part.type] = part.value; return out; }, {});
+  const type = meetingTypes.find(item => String(item.id) === String(booking.meeting_type_id) || String(item.supabaseId) === String(booking.meeting_type_id));
+  return {
+    id: booking.id,
+    name: booking.guest_name, email: booking.guest_email,
+    guestTimezone: booking.guest_timezone,
+    date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}`,
+    starts_at: booking.starts_at, ends_at: booking.ends_at,
+    meetingTypeId: booking.meeting_type_id, meetingType: type?.en || type?.name_en || 'Meeting',
+    status: booking.status, notes: booking.notes || null, createdAt: booking.created_at,
+    cancelledAt: booking.cancelled_at || null, cancellationReason: booking.cancellation_reason || null
+  };
+}
+function publicBookingResponse(booking, meetingType, timezone, manageToken = null) {
   const startsAt = booking?.starts_at ? new Date(booking.starts_at) : null;
   const formatter = timezone && startsAt ? new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : null;
   const parts = formatter ? formatter.formatToParts(startsAt).reduce((result, part) => { if (part.type !== 'literal') result[part.type] = part.value; return result; }, {}) : {};
@@ -82,8 +115,18 @@ function publicBookingResponse(booking, meetingType, timezone) {
     time: parts.hour && parts.minute ? `${parts.hour}:${parts.minute}` : startsAt?.toISOString().slice(11, 16),
     meetingType: meetingType?.en || meetingType?.name_en || 'Meeting',
     status: booking.status,
-    createdAt: booking.created_at
+    createdAt: booking.created_at,
+    ...(manageToken ? { managementUrl: `/manage/${encodeURIComponent(booking.id)}#token=${encodeURIComponent(manageToken)}` } : {})
   };
+}
+function requestManageToken(req) {
+  const value = String(req.get('authorization') || '');
+  const match = value.match(/^BookingToken ([A-Za-z0-9_-]{43})$/);
+  return match ? match[1] : null;
+}
+function normalizedLocalDateTime(date, time) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !/^\d{2}:\d{2}$/.test(String(time || ''))) return null;
+  return `${date} ${time}:00`;
 }
 const authAttempts = new Map();
 app.use('/api/auth', (req, res, next) => { const key = req.ip || 'local'; const now = Date.now(); const recent = (authAttempts.get(key) || []).filter(t => now - t < 60000); if (recent.length >= 20) return res.status(429).json({ error: 'Too many authentication attempts. Try again later.' }); recent.push(now); authAttempts.set(key, recent); next(); });
@@ -96,26 +139,38 @@ async function googleCalendarChange(userId, eventId, method, payload = null) { c
 }
 
 app.use(async (req, res, next) => {
-  const publicBookingPath = req.path === '/api/bookings' || req.path.startsWith('/api/public/') || req.path === '/api/availability/slots';
-  if (!config.useSupabase || publicBookingPath || (req.method === 'GET' && !['/api/auth/google', '/api/auth/google/callback'].includes(req.path))) return next();
+  const publicBookingPath = req.path === '/api/bookings' || req.path.startsWith('/api/public/') || req.path === '/api/availability/slots' || /^\/api\/bookings\/[^/]+\/guest(?:\/|$)/.test(req.path);
+  const supabaseAuthGetPaths = ['/api/auth/google', '/api/auth/google/callback', '/api/auth/me'];
+  if (!config.useSupabase || publicBookingPath || (req.method === 'GET' && !supabaseAuthGetPaths.includes(req.path))) return next();
   const client = require('./supabase/client');
   try {
     const authPath = req.path.startsWith('/api/auth/');
     const authenticatedUserId = currentUser(req);
     const owner = authPath ? null : await supabaseState.ownerProfile(authenticatedUserId);
     if (config.useSupabase && req.path === '/api/auth/google' && req.method === 'GET') {
+      const { verifier, challenge } = createPkcePair();
       const redirectTo = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
       const { url } = client.supabaseAuthConfig();
-      return res.redirect(`${url}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`);
+      res.setHeader('Set-Cookie', pkceVerifierCookie(verifier, config.isProduction));
+      const authorizeUrl = new URL(`${url}/auth/v1/authorize`);
+      authorizeUrl.searchParams.set('provider', 'google');
+      authorizeUrl.searchParams.set('redirect_to', redirectTo);
+      authorizeUrl.searchParams.set('code_challenge', challenge);
+      authorizeUrl.searchParams.set('code_challenge_method', 's256');
+      return res.redirect(authorizeUrl.toString());
     }
     if (config.useSupabase && req.path === '/api/auth/google/callback' && req.method === 'GET') {
-      if (!req.query.code) return res.status(400).send('Missing Supabase OAuth code.');
-      const auth = await client.authExchange(req.query.code);
+      const codeVerifier = cookieValue(req, 'calpro_oauth_verifier');
+      if (!req.query.code || !/^[A-Za-z0-9_-]{43,128}$/.test(String(codeVerifier || ''))) {
+        res.setHeader('Set-Cookie', clearPkceVerifierCookie(config.isProduction));
+        return res.status(400).send('Invalid or expired Supabase OAuth callback. Please sign in again.');
+      }
+      const auth = await client.authExchange(req.query.code, codeVerifier);
       if (!auth.user?.id) return res.status(502).send('Google sign-in did not return a user.');
       const token = sessionToken(auth.user.id); sessions.set(token, auth.user.id);
       const existing = await client.list('profiles', `?id=eq.${encodeURIComponent(auth.user.id)}&select=id`);
       if (!existing.length) await client.insert('profiles', { id: auth.user.id, name: auth.user.user_metadata?.full_name || auth.user.email || 'Mawaeedy user', timezone: 'Asia/Riyadh' });
-      res.setHeader('Set-Cookie', sessionCookie(token));
+      res.setHeader('Set-Cookie', [sessionCookie(token), clearPkceVerifierCookie(config.isProduction)]);
       return res.redirect('/');
     }
     if (req.path === '/api/auth/register' && req.method === 'POST') {
@@ -157,9 +212,125 @@ app.use(async (req, res, next) => {
     next();
   } catch (error) { return res.status(503).json({ error: 'Unable to save data to Supabase.', detail: error.message }); }
 });
-app.get('/api/state', async (req, res) => { try { const userId = currentUser(req); if (!userId) return res.status(401).json({ error: 'Authentication required.' }); if (config.useSupabase) { const d = await supabaseState.publicState(userId); const profile = await persistence.getProfileByOwner(userId); const meetingTypes = await persistence.listMeetingTypes(userId); const availability = await persistence.getAvailability(userId); return res.json({ ...d, profile: profile || {}, meetingTypes, availability, bookings: [] }); } const d = readData(); const availability = await persistence.getAvailability(userId); res.json({ ...d, availability }); } catch (error) { res.status(503).json({ error: 'Persistence is unavailable.', detail: error.message }); } });
+app.get('/api/state', async (req, res) => { try { const userId = currentUser(req); if (!userId) return res.status(401).json({ error: 'Authentication required.' }); if (config.useSupabase) { const d = await supabaseState.publicState(userId); const profile = await persistence.getProfileByOwner(userId); const meetingTypes = await persistence.listMeetingTypes(userId); const availability = await persistence.getAvailability(userId); const rows = await bookingService.listOwnerBookings(userId); const bookings = rows.map(row => bookingView(row, meetingTypes, availability.schedule?.timezone || profile?.timezone || 'UTC')); return res.json({ ...d, profile: profile || {}, meetingTypes, availability, bookings }); } const d = readData(); const availability = await persistence.getAvailability(userId); const bookings = await bookingService.listOwnerBookings(userId); const safeBookings = bookings.map(row => bookingView(row, d.meetingTypes || [], d.profile?.timezone || 'UTC')); const { bookings: _ignored, ...safeState } = d; res.json({ ...safeState, bookings: safeBookings, availability }); } catch { res.status(503).json({ error: 'Persistence is unavailable.' }); } });
 app.get('/api/health', (req, res) => { const d = config.persistenceBackend === 'sqlite' ? readData() : null; res.json({ status: 'ok', service: 'calpro', database: { backend: config.persistenceBackend, status: config.useSupabase ? 'configured' : 'connected' }, googleCalendar: Boolean(d?.integrations?.googleCalendar), timestamp: new Date().toISOString() }); });
 app.get('/api/public/:slug', async (req, res) => { try { const result = await persistence.getPublicProfileBySlug(req.params.slug); if (!result) return res.status(404).json({ error: 'Scheduling profile not found.' }); return res.json({ slug: req.params.slug, profile: result.profile, meetingTypes: result.meetingTypes, availability: result.availability, timezone: result.profile.timezone }); } catch (error) { return res.status(503).json({ error: 'Public profile is unavailable.', detail: error.message }); } });
+app.get('/api/bookings', requireAuth, async (req, res) => {
+  try {
+    if (config.useSupabase) {
+      const rows = await bookingService.listOwnerBookings(req.userId);
+      const [types, availability, profile] = await Promise.all([persistence.listMeetingTypes(req.userId), persistence.getAvailability(req.userId), persistence.getProfileByOwner(req.userId)]);
+      return res.json(rows.map(row => bookingView(row, types, availability.schedule?.timezone || profile?.timezone || 'UTC')));
+    }
+    const data = readData();
+    const profile = await persistence.getProfileByOwner(req.userId), types = await persistence.listMeetingTypes(req.userId), availability = await persistence.getAvailability(req.userId);
+    const rows = await bookingService.listOwnerBookings(req.userId);
+    return res.json(rows.map(row => bookingView(row, types, availability.schedule?.timezone || profile?.timezone || 'UTC')));
+  } catch { return res.status(503).json({ error: 'BOOKING_LIFECYCLE_FAILED' }); }
+});
+app.get('/api/bookings/:id/guest', async (req, res) => {
+  const token = requestManageToken(req);
+  const tokenHash = token && hashManageToken(token);
+  if (!tokenHash) return res.status(403).json({ error: 'INVALID_MANAGE_TOKEN' });
+  try {
+    if (config.useSupabase) {
+      const booking = await bookingService.getGuestBooking(req.params.id, tokenHash);
+      return res.json(booking);
+    }
+    const booking = (readData().bookings || []).find(row => String(row.id) === String(req.params.id) && row.manage_token_hash === tokenHash);
+    if (!booking) return res.status(403).json({ error: 'INVALID_MANAGE_TOKEN' });
+    return res.json({ id: booking.id, status: booking.status, guest_name: booking.name, guest_email: booking.email, guest_timezone: booking.guestTimezone, starts_at: booking.starts_at || null, ends_at: booking.ends_at || null, notes: booking.notes || null, host_timezone: readData().profile?.timezone || 'UTC', meeting_type: { name_en: booking.meetingType, name_ar: '', duration_minutes: 30, mode: '' } });
+  } catch (error) { return sendLifecycleError(res, error); }
+});
+app.post('/api/bookings/:id/guest/cancel', async (req, res) => {
+  const token = requestManageToken(req), tokenHash = token && hashManageToken(token);
+  const key = operationKey(req.body?.operationKey);
+  if (!tokenHash) return res.status(403).json({ error: 'INVALID_MANAGE_TOKEN' });
+  if (!key) return res.status(400).json({ error: 'INVALID_INPUT' });
+  try {
+    if (config.useSupabase) {
+      const booking = await bookingService.cancelGuestBooking(req.params.id, { manageTokenHash: tokenHash, reason: req.body?.reason, operationKey: key });
+      return res.json({ id: booking.id, status: booking.status, cancelledAt: booking.cancelled_at });
+    }
+    const data = readData(), booking = (data.bookings || []).find(row => String(row.id) === String(req.params.id) && row.manage_token_hash === tokenHash);
+    if (!booking) return res.status(403).json({ error: 'INVALID_MANAGE_TOKEN' });
+    if (booking.status !== 'cancelled') { booking.status = 'cancelled'; booking.cancelled_at = new Date().toISOString(); booking.cancellation_reason = String(req.body?.reason || '').trim() || null; data.booking_history ||= []; data.booking_history.push({ booking_id: booking.id, event_type: 'cancelled', operation_key: key, actor_type: 'guest', old_starts_at: booking.starts_at || null, old_ends_at: booking.ends_at || null, new_starts_at: null, new_ends_at: null, created_at: new Date().toISOString() }); writeData(data); }
+    return res.json({ id: booking.id, status: booking.status, cancelledAt: booking.cancelled_at || null });
+  } catch (error) { return sendLifecycleError(res, error); }
+});
+app.post('/api/bookings/:id/guest/reschedule', async (req, res) => {
+  const token = requestManageToken(req), tokenHash = token && hashManageToken(token);
+  const key = operationKey(req.body?.operationKey);
+  if (!tokenHash) return res.status(403).json({ error: 'INVALID_MANAGE_TOKEN' });
+  if (!key) return res.status(400).json({ error: 'INVALID_INPUT' });
+  try {
+    let timezone;
+    if (config.useSupabase) timezone = (await bookingService.getGuestBooking(req.params.id, tokenHash))?.host_timezone;
+    else timezone = readData().profile?.timezone;
+    const requestedLocal = normalizedLocalDateTime(req.body?.date, req.body?.time);
+    const resolved = timezone && requestedLocal ? resolveLocalWallClock(requestedLocal, timezone) : { status: 'invalid' };
+    if (resolved.status !== 'resolved') return res.status(400).json({ error: 'INVALID_LOCAL_TIME' });
+    if (config.useSupabase) {
+      const booking = await bookingService.rescheduleGuestBooking(req.params.id, { manageTokenHash: tokenHash, requestedLocal, requestedOffsetMinutes: resolved.offsetMinutes, requestedTimezone: timezone, operationKey: key });
+      return res.json({ id: booking.id, status: booking.status, starts_at: booking.starts_at, ends_at: booking.ends_at });
+    }
+    const data = readData(), booking = (data.bookings || []).find(row => String(row.id) === String(req.params.id) && row.manage_token_hash === tokenHash);
+    if (!booking) return res.status(403).json({ error: 'INVALID_MANAGE_TOKEN' });
+    if (booking.status !== 'confirmed') return res.status(409).json({ error: 'INVALID_BOOKING_STATE' });
+    if (bookingOverlaps(data, req.body.date, req.body.time, Number(data.meetingTypes?.find(t => t.id === booking.meetingTypeId)?.duration || 30), booking.id)) return res.status(409).json({ error: 'SLOT_TAKEN' });
+    const old = { starts_at: booking.starts_at || `${booking.date}T${booking.time}:00`, ends_at: booking.ends_at || null };
+    booking.date = req.body.date; booking.time = req.body.time; booking.starts_at = resolved.instant; booking.status = 'confirmed';
+    data.booking_history ||= []; data.booking_history.push({ booking_id: booking.id, event_type: 'rescheduled', operation_key: key, actor_type: 'guest', old_starts_at: old.starts_at, old_ends_at: old.ends_at, new_starts_at: resolved.instant, new_ends_at: null, created_at: new Date().toISOString() }); writeData(data);
+    return res.json({ id: booking.id, status: booking.status, starts_at: booking.starts_at, ends_at: booking.ends_at || null });
+  } catch (error) { return sendLifecycleError(res, error); }
+});
+app.get('/api/bookings/:id', requireAuth, async (req, res) => {
+  try {
+    if (config.useSupabase) {
+      const booking = await bookingService.getBooking(req.userId, req.params.id);
+      if (!booking) return res.status(404).json({ error: 'BOOKING_NOT_FOUND' });
+      const [types, availability, profile] = await Promise.all([persistence.listMeetingTypes(req.userId), persistence.getAvailability(req.userId), persistence.getProfileByOwner(req.userId)]);
+      return res.json(bookingView(booking, types, availability.schedule?.timezone || profile?.timezone || 'UTC'));
+    }
+    const booking = (readData().bookings || []).find(row => String(row.id) === String(req.params.id) && String(row.owner_id) === String(req.userId));
+    if (!booking) return res.status(404).json({ error: 'BOOKING_NOT_FOUND' });
+    const types=await persistence.listMeetingTypes(req.userId), availability=await persistence.getAvailability(req.userId), profile=await persistence.getProfileByOwner(req.userId);
+    return res.json(bookingView(booking,types,availability.schedule?.timezone||profile?.timezone||'UTC'));
+  } catch { return res.status(503).json({ error: 'BOOKING_LIFECYCLE_FAILED' }); }
+});
+app.post('/api/bookings/:id/cancel', requireAuth, async (req, res) => {
+  const key = operationKey(req.body?.operationKey);
+  if (!key) return res.status(400).json({ error: 'INVALID_INPUT' });
+  try {
+    if (config.useSupabase) {
+      const booking = await bookingService.cancelBooking(req.userId, req.params.id, { reason: req.body?.reason, operationKey: key });
+      return res.json({ id: booking.id, status: booking.status, cancelledAt: booking.cancelled_at });
+    }
+    const data = readData(), booking = (data.bookings || []).find(row => String(row.id) === String(req.params.id) && String(row.owner_id) === String(req.userId));
+    if (!booking) return res.status(404).json({ error: 'BOOKING_NOT_FOUND' });
+    if (booking.status !== 'cancelled') { booking.status = 'cancelled'; booking.cancelled_at = new Date().toISOString(); booking.cancellation_reason = String(req.body?.reason || '').trim() || null; writeData(data); }
+    return res.json({ id: booking.id, status: booking.status, cancelledAt: booking.cancelled_at || null });
+  } catch (error) { return sendLifecycleError(res, error); }
+});
+app.post('/api/bookings/:id/reschedule', requireAuth, async (req, res) => {
+  const key = operationKey(req.body?.operationKey), requestedLocal = normalizedLocalDateTime(req.body?.date, req.body?.time);
+  if (!key || !requestedLocal) return res.status(400).json({ error: 'INVALID_INPUT' });
+  try {
+    if (config.useSupabase) {
+      const availability = await persistence.getAvailability(req.userId), timezone = availability.schedule?.timezone;
+      const resolved = timezone ? resolveLocalWallClock(requestedLocal, timezone) : { status: 'invalid' };
+      if (resolved.status !== 'resolved') return res.status(400).json({ error: 'INVALID_LOCAL_TIME' });
+      const booking = await bookingService.rescheduleBooking(req.userId, req.params.id, { requestedLocal, requestedOffsetMinutes: resolved.offsetMinutes, requestedTimezone: timezone, operationKey: key });
+      return res.json(bookingView(booking, await persistence.listMeetingTypes(req.userId), timezone));
+    }
+    const data = readData(), booking = (data.bookings || []).find(row => String(row.id) === String(req.params.id) && String(row.owner_id) === String(req.userId));
+    if (!booking) return res.status(404).json({ error: 'BOOKING_NOT_FOUND' });
+    if (booking.status !== 'confirmed') return res.status(409).json({ error: 'INVALID_BOOKING_STATE' });
+    if (bookingOverlaps(data, req.body.date, req.body.time, Number(data.meetingTypes?.find(t => t.id === booking.meetingTypeId)?.duration || 30), booking.id)) return res.status(409).json({ error: 'SLOT_TAKEN' });
+    booking.date = req.body.date; booking.time = req.body.time; booking.status = 'confirmed'; writeData(data);
+    return res.json(booking);
+  } catch (error) { return sendLifecycleError(res, error); }
+});
 app.post('/api/bookings', async (req, res) => {
   const body = req.body || {};
   const date = String(body.date || '').trim();
@@ -182,6 +353,8 @@ app.post('/api/bookings', async (req, res) => {
       if (!meetingType?.supabaseId) return res.status(404).json({ error: 'INACTIVE_MEETING_TYPE' });
       const resolved = resolveLocalWallClock(`${date} ${time}:00`, publicState.profile.timezone);
       if (resolved.status !== 'resolved') return res.status(400).json({ error: 'INVALID_LOCAL_TIME' });
+      const manageToken = deriveManageToken(idempotencyKey, config.manageTokenSecret);
+      const manageTokenHash = hashManageToken(manageToken);
       const booking = await bookingService.createPublicBooking({
         profileSlug,
         meetingTypeId: meetingType.supabaseId,
@@ -192,9 +365,10 @@ app.post('/api/bookings', async (req, res) => {
         guestEmail,
         guestPhone: body.phone || body.guestPhone || null,
         notes: body.notes || null,
-        idempotencyKey
+        idempotencyKey,
+        manageTokenHash
       });
-      return res.status(201).json(publicBookingResponse(booking, meetingType, publicState.profile.timezone));
+      return res.status(201).json(publicBookingResponse(booking, meetingType, publicState.profile.timezone, manageToken));
     } catch (error) {
       if (error instanceof BookingValidationError) return res.status(400).json({ error: 'INVALID_INPUT' });
       return sendBookingError(res, error);
@@ -206,7 +380,16 @@ app.post('/api/bookings', async (req, res) => {
   if (!type) return res.status(404).json({ error: 'INACTIVE_MEETING_TYPE' });
   if (bookingOutsideRules(d, date, time)) return res.status(409).json({ error: 'BEYOND_BOOKING_HORIZON' });
   if (bookingOverlaps(d, date, time, Number(type.duration || 30))) return res.status(409).json({ error: 'SLOT_TAKEN' });
-  const booking = { id: Date.now().toString(), name: guestName, email: guestEmail, date, time, meetingTypeId, notes: body.notes || null, guestTimezone, manageToken: crypto.randomBytes(24).toString('hex'), meetingType: type.en || type.name || 'Meeting', status: 'confirmed', createdAt: new Date().toISOString() };
+  const manageToken = deriveManageToken(idempotencyKey, config.manageTokenSecret);
+  const manageTokenHash = hashManageToken(manageToken);
+  d.bookings ||= [];
+  const prior = d.bookings.find(item => item.idempotencyKey === idempotencyKey);
+  if (prior) {
+    const same = prior.profileSlug === profileSlug && prior.meetingTypeId === meetingTypeId && prior.date === date && prior.time === time && prior.name === guestName && prior.email === guestEmail && prior.guestTimezone === guestTimezone && (prior.manage_token_hash || '') === manageTokenHash;
+    if (!same) return res.status(409).json({ error: 'IDEMPOTENCY_CONFLICT' });
+    return res.status(200).json({ id: prior.id, name: prior.name, email: prior.email, date: prior.date, time: prior.time, meetingType: prior.meetingType, status: prior.status, createdAt: prior.createdAt, managementUrl: `/manage/${encodeURIComponent(prior.id)}#token=${encodeURIComponent(manageToken)}` });
+  }
+  const booking = { id: crypto.randomUUID(), owner_id: d.users?.[0]?.id || 'owner', profileSlug, idempotencyKey, name: guestName, email: guestEmail, date, time, meetingTypeId, notes: body.notes || null, guestTimezone, manage_token_hash: manageTokenHash, meetingType: type.en || type.name || 'Meeting', status: 'confirmed', createdAt: new Date().toISOString() };
   d.bookings = d.bookings || [];
   d.bookings.push(booking);
   d.notifications = d.notifications || [];
@@ -216,7 +399,7 @@ app.post('/api/bookings', async (req, res) => {
   let calendarError = null;
   try { calendarEvent = await googleCalendarCreate(d.users?.[0]?.id, booking, type, d.profile?.timezone); } catch (error) { calendarError = error.message; }
   if (calendarEvent) { booking.googleEventId = calendarEvent.id; writeData(d); }
-  return res.status(201).json({ id: booking.id, name: booking.name, email: booking.email, date: booking.date, time: booking.time, meetingType: booking.meetingType, status: booking.status, createdAt: booking.createdAt, calendar: calendarEvent ? { status: 'created', eventId: calendarEvent.id, htmlLink: calendarEvent.htmlLink || null } : { status: calendarError ? 'error' : 'not_connected', message: calendarError || 'Google Calendar is not connected.' } });
+  return res.status(201).json({ id: booking.id, name: booking.name, email: booking.email, date: booking.date, time: booking.time, meetingType: booking.meetingType, status: booking.status, createdAt: booking.createdAt, managementUrl: `/manage/${encodeURIComponent(booking.id)}#token=${encodeURIComponent(manageToken)}`, calendar: calendarEvent ? { status: 'created', eventId: calendarEvent.id, htmlLink: calendarEvent.htmlLink || null } : { status: calendarError ? 'error' : 'not_connected', message: calendarError || 'Google Calendar is not connected.' } });
 });
 app.get('/api/availability', requireAuth, async (req, res) => { try { res.json(await persistence.getAvailability(req.userId)); } catch (error) { res.status(503).json({ error: 'Availability is unavailable.', detail: error.message }); } });
 app.put('/api/availability', requireAuth, async (req, res) => { try { const body = req.body || {}; if (!body.schedule || !Array.isArray(body.intervals)) return res.status(400).json({ error: 'A structured schedule and interval array are required.' }); const normalizedIntervals = normalizeIntervals(body.intervals); const schedule = body.schedule.id ? await persistence.updateAvailabilitySchedule(req.userId, body.schedule.id, body.schedule) : await persistence.createAvailabilitySchedule(req.userId, body.schedule); if (!schedule) return res.status(404).json({ error: 'Availability schedule not found.' }); const result = await persistence.replaceScheduleIntervals(req.userId, schedule.id, normalizedIntervals); if (Array.isArray(body.overrides)) { for (const override of body.overrides) { if (override.id) await persistence.updateAvailabilityOverride(req.userId, override.id, override); else await persistence.createAvailabilityOverride(req.userId, { ...override, scheduleId: schedule.id }); } } return res.json(result || { schedule, intervals: [], overrides: [] }); } catch (error) { res.status(400).json({ error: error.message }); } });
@@ -251,8 +434,44 @@ app.get('/api/timezone/convert', (req, res) => { const time = String(req.query.t
 app.post('/api/integrations/google-calendar', requireAuth, (req, res) => { const d = readData(); d.integrations.googleCalendar = true; d.integrations.googleMeet = true; writeData(d); res.json({ ok: true, integrations: d.integrations }); });
 app.post('/api/calendar/sync', requireAuth, (req, res) => { const provider = String(req.body?.provider || '').toLowerCase(); const allowed = ['google', 'outlook', 'apple']; if (!allowed.includes(provider)) return res.status(400).json({ error: 'Unsupported calendar provider.' }); const d = readData(); const key = provider === 'google' ? 'googleCalendar' : provider; d.integrations[key] = true; writeData(d); res.json({ ok: true, provider, syncedAt: new Date().toISOString(), conflicts: d.bookings.length ? 1 : 0 }); });
 app.post('/api/meeting-types', requireAuth, async (req, res) => { try { const item = await persistence.createMeetingType(req.userId, req.body || {}); res.status(201).json(item); } catch (error) { res.status(400).json({ error: error.message }); } });
-app.get('/api/bookings/:id/ics', (req, res) => { const d = readData(); const booking = d.bookings.find(x => x.id === req.params.id); if (!booking) return res.status(404).json({ error: 'Booking not found.' }); const sessionUser = sessions.get(cookieValue(req, 'calpro_session')); const token = req.headers['x-booking-token'] || req.query.token; if (!sessionUser && token !== booking.manageToken) return res.status(403).json({ error: 'A valid booking token or host login is required.' }); const type = d.meetingTypes.find(x => x.id === booking.meetingTypeId); const duration = Number(type?.duration || 30); const start = `${booking.date.replaceAll('-','')}T${booking.time.replace(':','')}00`; const startMinutes = Number(booking.time.slice(0,2))*60 + Number(booking.time.slice(3)) + duration; const end = `${booking.date.replaceAll('-','')}T${String(Math.floor(startMinutes/60)).padStart(2,'0')}${String(startMinutes%60).padStart(2,'0')}00`; const clean = value => String(value || '').replace(/[\\,;\n]/g, ' '); const ics = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//CalPro//Mawaeedy//EN','BEGIN:VEVENT',`UID:${booking.id}@calpro`,`DTSTAMP:${new Date().toISOString().replace(/[-:.]/g,'').replace(/\d{3}Z$/,'Z')}`,`DTSTART;TZID=${d.profile.timezone}:${start}`,`DTEND;TZID=${d.profile.timezone}:${end}`,`SUMMARY:${clean(booking.meetingType)}`,`DESCRIPTION:${clean(booking.notes || 'Scheduled with Mawaeedy')}`,`ORGANIZER:CN=${clean(d.profile.name)}`,`ATTENDEE;CN=${clean(booking.name)}:mailto:${clean(booking.email)}`,'END:VEVENT','END:VCALENDAR'].join('\r\n'); res.setHeader('Content-Type','text/calendar; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="calpro-${booking.id}.ics"`); res.send(ics); });
-app.patch('/api/bookings/:id', async (req, res) => { const d = readData(); const booking = d.bookings.find(x => x.id === req.params.id); if (!booking) return res.status(404).json({ error: 'Booking not found.' }); const sessionUser = sessions.get(cookieValue(req, 'calpro_session')); if (!sessionUser && req.headers['x-booking-token'] !== booking.manageToken) return res.status(403).json({ error: 'A valid booking token or host login is required.' }); d.notifications = d.notifications || []; if (req.body?.status === 'cancelled') { booking.status = 'cancelled'; d.notifications.push({ id: `cancel-${booking.id}-${Date.now()}`, channel: 'in-app', recipient: 'host', type: 'booking-cancelled', bookingId: booking.id, message: `${booking.name} cancelled the ${booking.meetingType} on ${booking.date} at ${booking.time}.`, status: 'unread', createdAt: new Date().toISOString() }); writeData(d); if (booking.googleEventId) { try { await googleCalendarChange(d.users?.[0]?.id, booking.googleEventId, 'DELETE'); } catch {} } return res.json(booking); } if (req.body?.date || req.body?.time) { const date = req.body.date || booking.date; const time = req.body.time || booking.time; const type = d.meetingTypes.find(x => x.id === booking.meetingTypeId); if (bookingOverlaps(d, date, time, Number(type?.duration || 30), booking.id)) return res.status(409).json({ error: 'This time overlaps another meeting.' }); booking.date = date; booking.time = time; booking.status = 'rescheduled'; d.notifications.push({ id: `reschedule-${booking.id}-${Date.now()}`, channel: 'in-app', recipient: 'host', type: 'booking-rescheduled', bookingId: booking.id, message: `${booking.name} rescheduled to ${booking.date} at ${booking.time}.`, status: 'unread', createdAt: new Date().toISOString() }); writeData(d); return res.json(booking); } res.status(400).json({ error: 'Provide a new date/time or cancelled status.' }); });
+app.get('/api/bookings/:id/ics', requireAuth, async (req, res) => {
+  try {
+    let booking, timezone, meetingType, hostName;
+    if (config.useSupabase) {
+      booking = await bookingService.getBooking(req.userId, req.params.id);
+      if (!booking) return res.status(404).json({ error: 'BOOKING_NOT_FOUND' });
+      const [profile, types, availability] = await Promise.all([persistence.getProfileByOwner(req.userId), persistence.listMeetingTypes(req.userId), persistence.getAvailability(req.userId)]);
+      timezone = availability.schedule?.timezone || profile?.timezone || 'UTC'; hostName = profile?.name || 'Mawaeedy';
+      meetingType = types.find(type => String(type.supabaseId || type.id) === String(booking.meeting_type_id));
+    } else {
+      booking = (readData().bookings || []).find(item => String(item.id) === String(req.params.id) && String(item.owner_id) === String(req.userId));
+      if (!booking) return res.status(404).json({ error: 'BOOKING_NOT_FOUND' });
+      const data = readData(); timezone = data.profile?.timezone || 'UTC'; hostName = data.profile?.name || 'Mawaeedy'; meetingType = (data.meetingTypes || []).find(type => String(type.id) === String(booking.meetingTypeId));
+    }
+    const start = new Date(booking.starts_at || `${booking.date}T${booking.time}:00Z`), end = new Date(booking.ends_at || start.getTime() + Number(meetingType?.duration || 30) * 60000);
+    const utc = value => value.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+    const clean = value => String(value || '').replace(/[\\,;\r\n]/g, ' ');
+    const ics = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Mawaeedy//Booking//EN','BEGIN:VEVENT',`UID:${clean(booking.id)}@mawaeedy`,`DTSTAMP:${utc(new Date())}`,`DTSTART:${utc(start)}`,`DTEND:${utc(end)}`,`SUMMARY:${clean(meetingType?.en || booking.meetingType || 'Meeting')}`,`DESCRIPTION:${clean(booking.notes || 'Scheduled with Mawaeedy')}`,`ORGANIZER:CN=${clean(hostName)}`,'END:VEVENT','END:VCALENDAR'].join('\r\n');
+    res.setHeader('Content-Type','text/calendar; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="mawaeedy-${encodeURIComponent(booking.id)}.ics"`); return res.send(ics);
+  } catch { return res.status(503).json({ error: 'BOOKING_LIFECYCLE_FAILED' }); }
+});
+app.patch('/api/bookings/:id', requireAuth, async (req, res) => {
+  // Compatibility endpoint is deliberately host-only and owner-scoped.
+  const key = operationKey(req.body?.operationKey) || crypto.randomUUID();
+  if (req.body?.status === 'cancelled') {
+    try { const result = config.useSupabase ? await bookingService.cancelBooking(req.userId, req.params.id, { reason: req.body?.reason, operationKey: key }) : null;
+      if (config.useSupabase) return res.json(bookingView(result));
+      const data=readData(), booking=(data.bookings||[]).find(item=>String(item.id)===String(req.params.id)&&String(item.owner_id)===String(req.userId)); if(!booking)return res.status(404).json({error:'BOOKING_NOT_FOUND'}); if(booking.status!=='cancelled'){booking.status='cancelled';booking.cancelled_at=new Date().toISOString();booking.cancellation_reason=String(req.body?.reason||'').trim()||null;writeData(data)} return res.json(booking);
+    } catch(error) { return sendLifecycleError(res,error); }
+  }
+  if (req.body?.date || req.body?.time) {
+    try { const data=readData(); let booking;
+      if(config.useSupabase){const availability=await persistence.getAvailability(req.userId),timezone=availability.schedule?.timezone;const local=normalizedLocalDateTime(req.body.date,req.body.time),resolved=local&&timezone?resolveLocalWallClock(local,timezone):{status:'invalid'};if(resolved.status!=='resolved')return res.status(400).json({error:'INVALID_LOCAL_TIME'});booking=await bookingService.rescheduleBooking(req.userId,req.params.id,{requestedLocal:local,requestedOffsetMinutes:resolved.offsetMinutes,requestedTimezone:timezone,operationKey:key});return res.json(bookingView(booking,await persistence.listMeetingTypes(req.userId),timezone))}
+      booking=(data.bookings||[]).find(item=>String(item.id)===String(req.params.id)&&String(item.owner_id)===String(req.userId));if(!booking)return res.status(404).json({error:'BOOKING_NOT_FOUND'});if(bookingOverlaps(data,req.body.date,req.body.time,Number(data.meetingTypes?.find(type=>String(type.id)===String(booking.meetingTypeId))?.duration||30),booking.id))return res.status(409).json({error:'SLOT_TAKEN'});booking.date=req.body.date;booking.time=req.body.time;booking.status='confirmed';writeData(data);return res.json(booking);
+    } catch(error) { return sendLifecycleError(res,error); }
+  }
+  return res.status(400).json({error:'INVALID_INPUT'});
+});
 if (require.main === module) app.listen(PORT, () => console.log(`CalPro running at http://localhost:${PORT}`));
 module.exports = app;
 module.exports.bookingErrorCategory = bookingErrorCategory;

@@ -375,28 +375,42 @@ function createSupabaseAdapter(client) {
     },
     async createAvailabilityOverride(ownerId, input) {
       const values = normalizeOverride(input);
-      const scheduleId = input.scheduleId ?? input.schedule_id ?? null;
-      if (scheduleId && !(await this.getAvailabilitySchedule(ownerId, scheduleId))) return null;
-      const existing = await client.list('availability_overrides', `?${ownerFilter(ownerId)}&override_date=eq.${encodeURIComponent(values.overrideDate)}&select=id&limit=1`);
-      if (existing.length) throw new Error('An override already exists for this date.');
-      const rows = await client.insert('availability_overrides', { owner_id: ownerId, schedule_id: scheduleId, override_date: values.overrideDate, is_available: values.isAvailable, start_local: values.startLocal, end_local: values.endLocal, reason: values.reason });
-      return rows[0] ? mapOverride(rows[0]) : null;
+      const requestedScheduleId = input.scheduleId ?? input.schedule_id ?? null;
+      const schedule = requestedScheduleId ? await this.getAvailabilitySchedule(ownerId, requestedScheduleId) : (await this.getAvailability(ownerId)).schedule;
+      if (!schedule) return null;
+      const rows = await client.rpc('mutate_availability_override', {
+        p_operation: 'create', p_owner_id: ownerId, p_schedule_id: schedule.id,
+        p_override_id: null, p_override_date: values.overrideDate, p_is_available: values.isAvailable,
+        p_start_local: values.startLocal, p_end_local: values.endLocal, p_reason: values.reason
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      return row ? mapOverride(row) : null;
     },
     async updateAvailabilityOverride(ownerId, overrideId, input) {
       const currentRows = await client.list('availability_overrides', `?${ownerFilter(ownerId)}&id=eq.${encodeURIComponent(overrideId)}&select=*&limit=1`);
       const current = currentRows[0] ? mapOverride(currentRows[0]) : null;
       if (!current) return null;
       const values = normalizeOverride({ overrideDate: input.overrideDate ?? current.overrideDate, isAvailable: input.isAvailable ?? current.isAvailable, startLocal: input.startLocal ?? current.startLocal, endLocal: input.endLocal ?? current.endLocal, reason: input.reason ?? current.reason });
-      const duplicate = await client.list('availability_overrides', `?${ownerFilter(ownerId)}&override_date=eq.${encodeURIComponent(values.overrideDate)}&id=neq.${encodeURIComponent(overrideId)}&select=id&limit=1`);
-      if (duplicate.length) throw new Error('An override already exists for this date.');
-      const rows = await client.update('availability_overrides', { override_date: values.overrideDate, is_available: values.isAvailable, start_local: values.startLocal, end_local: values.endLocal, reason: values.reason }, `?${ownerFilter(ownerId)}&id=eq.${encodeURIComponent(overrideId)}`);
-      return rows[0] ? mapOverride(rows[0]) : null;
+      const schedule = current.scheduleId ? await this.getAvailabilitySchedule(ownerId, current.scheduleId) : (await this.getAvailability(ownerId)).schedule;
+      if (!schedule) return null;
+      const rows = await client.rpc('mutate_availability_override', {
+        p_operation: 'update', p_owner_id: ownerId, p_schedule_id: schedule.id,
+        p_override_id: overrideId, p_override_date: values.overrideDate, p_is_available: values.isAvailable,
+        p_start_local: values.startLocal, p_end_local: values.endLocal, p_reason: values.reason
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      return row ? mapOverride(row) : null;
     },
     async deleteAvailabilityOverride(ownerId, overrideId) {
-      const currentRows = await client.list('availability_overrides', `?${ownerFilter(ownerId)}&id=eq.${encodeURIComponent(overrideId)}&select=id&limit=1`);
+      const currentRows = await client.list('availability_overrides', `?${ownerFilter(ownerId)}&id=eq.${encodeURIComponent(overrideId)}&select=schedule_id&limit=1`);
       if (!currentRows.length) return null;
-      await client.remove('availability_overrides', `?${ownerFilter(ownerId)}&id=eq.${encodeURIComponent(overrideId)}`);
-      return { id: overrideId, deleted: true };
+      const schedule = currentRows[0].schedule_id ? await this.getAvailabilitySchedule(ownerId, currentRows[0].schedule_id) : (await this.getAvailability(ownerId)).schedule;
+      if (!schedule) return null;
+      return client.rpc('mutate_availability_override', {
+        p_operation: 'delete', p_owner_id: ownerId, p_schedule_id: schedule.id,
+        p_override_id: overrideId, p_override_date: null, p_is_available: null,
+        p_start_local: null, p_end_local: null, p_reason: null
+      });
     },
     async getPublicAvailability(ownerId) {
       return sanitizePublicAvailability(await this.getAvailability(ownerId));

@@ -41,9 +41,10 @@ async function authRequest(path, values) {
   if (!response.ok) throw new Error(body?.msg || body?.message || body?.error_description || 'Supabase Auth request failed.');
   return body;
 }
-async function authExchange(code) {
+async function authExchange(code, codeVerifier) {
+  if (!code || !/^[A-Za-z0-9_-]{43,128}$/.test(String(codeVerifier || ''))) throw new Error('Supabase OAuth exchange requires a code and PKCE verifier.');
   const { url, key } = supabaseAuthConfig();
-  const response = await fetch(`${url}/auth/v1/token?grant_type=authorization_code`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify({ auth_code: code }) });
+  const response = await fetch(`${url}/auth/v1/token?grant_type=pkce`, { method: 'POST', headers: { apikey: key, 'Content-Type': 'application/json' }, body: JSON.stringify({ auth_code: code, code_verifier: codeVerifier }) });
   const text = await response.text(); let body = null; try { body = text ? JSON.parse(text) : null; } catch { body = text; }
   if (!response.ok) throw new Error(body?.msg || body?.message || 'Supabase OAuth exchange failed.');
   return body;

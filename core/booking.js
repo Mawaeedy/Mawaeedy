@@ -103,6 +103,7 @@ function normalizeBookingInput(input = {}) {
 function mapBooking(row, ownerId) {
   if (!row) return null;
   const mapped = normalizeBookingInput({ ...row, owner_id: row.owner_id || ownerId });
+  delete mapped.manage_token_hash;
   return {
     ...mapped,
     id: row.id,

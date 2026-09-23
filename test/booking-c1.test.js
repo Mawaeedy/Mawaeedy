@@ -70,7 +70,7 @@ test('Supabase adapter lists only owner rows and does not silently fall back', a
   const rows = await service.listOwnerBookings('owner-a');
   assert.equal(rows[0].owner_id, 'owner-a');
   assert.match(calls[0][2], /owner_id=eq\.owner-a/);
-  const created = await service.createPublicBooking({ profileSlug: 'ahmed', meetingTypeId: 'type-a', requestedLocal: '2026-10-01 09:00:00', requestedOffsetMinutes: 180, guestTimezone: 'Asia/Riyadh', guestName: 'Guest', guestEmail: 'guest@example.com', idempotencyKey: 'attempt-1234567890' });
+  const created = await service.createPublicBooking({ profileSlug: 'ahmed', meetingTypeId: 'type-a', requestedLocal: '2026-10-01 09:00:00', requestedOffsetMinutes: 180, guestTimezone: 'Asia/Riyadh', guestName: 'Guest', guestEmail: 'guest@example.com', idempotencyKey: 'attempt-1234567890', manageTokenHash: 'a'.repeat(64) });
   assert.equal(created.status, 'confirmed');
   assert.equal(calls.at(-1)[0], 'rpc');
 });
