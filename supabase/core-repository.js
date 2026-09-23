@@ -53,19 +53,20 @@ function createCoreRepository(client) {
     },
     async createBooking(ownerId, booking) {
       if (!ownerId) throw new Error('Authenticated owner id is required.');
-      if (!booking.startsAt || !booking.endsAt || new Date(booking.endsAt) <= new Date(booking.startsAt)) throw new Error('Booking end must be after start.');
-      const rows = await client.insert('bookings', {
-        owner_id: ownerId,
-        meeting_type_id: booking.meetingTypeId,
-        guest_name: String(booking.guestName || '').trim(),
-        guest_email: String(booking.guestEmail || '').trim().toLowerCase(),
-        guest_timezone: booking.guestTimezone || null,
-        starts_at: new Date(booking.startsAt).toISOString(),
-        ends_at: new Date(booking.endsAt).toISOString(),
-        notes: booking.notes || null,
-        status: 'confirmed'
+      if (typeof client.rpc !== 'function') throw new Error('Atomic booking RPC client is required.');
+      const rows = await client.rpc('create_booking_atomically', {
+        p_profile_slug: booking.profileSlug,
+        p_meeting_type_id: booking.meetingTypeId,
+        p_requested_local: booking.requestedLocal,
+        p_requested_offset_minutes: booking.requestedOffsetMinutes,
+        p_guest_timezone: booking.guestTimezone,
+        p_guest_name: booking.guestName,
+        p_guest_email: booking.guestEmail,
+        p_guest_phone: booking.guestPhone || null,
+        p_notes: booking.notes || null,
+        p_idempotency_key: booking.idempotencyKey
       });
-      return rows[0] || null;
+      return Array.isArray(rows) ? rows[0] || null : rows;
     }
   };
 }

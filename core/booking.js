@@ -30,6 +30,37 @@ function validInstant(value, label) {
   return date.toISOString();
 }
 
+function normalizePublicBookingInput(input = {}) {
+  const profileSlug = String(input.profileSlug ?? input.profile_slug ?? '').trim().toLowerCase();
+  const meetingTypeId = String(input.meetingTypeId ?? input.meeting_type_id ?? '').trim();
+  const requestedLocal = String(input.requestedLocal ?? input.requested_local ?? '').trim();
+  const guestName = String(input.guestName ?? input.guest_name ?? input.name ?? '').trim();
+  const guestEmail = String(input.guestEmail ?? input.guest_email ?? input.email ?? '').trim().toLowerCase();
+  const guestTimezone = input.guestTimezone ?? input.guest_timezone;
+  const idempotencyKey = String(input.idempotencyKey ?? input.idempotency_key ?? '').trim();
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(profileSlug)) throw new BookingValidationError('Booking profile is invalid.');
+  if (!meetingTypeId) throw new BookingValidationError('Meeting type is required.');
+  if (!/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/.test(requestedLocal)) throw new BookingValidationError('Booking time is invalid.');
+  if (!guestName) throw new BookingValidationError('Guest name is required.');
+  if (!/^\S+@\S+\.\S+$/.test(guestEmail)) throw new BookingValidationError('Guest email is invalid.');
+  if (!isValidTimezone(guestTimezone)) throw new BookingValidationError('Guest timezone must be a valid IANA timezone.');
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) throw new BookingValidationError('Booking attempt key is invalid.');
+  const requestedOffsetMinutes = Number(input.requestedOffsetMinutes ?? input.requested_offset_minutes);
+  if (!Number.isInteger(requestedOffsetMinutes) || requestedOffsetMinutes < -840 || requestedOffsetMinutes > 840) throw new BookingValidationError('Booking timezone offset is invalid.');
+  return {
+    profile_slug: profileSlug,
+    meeting_type_id: meetingTypeId,
+    requested_local: requestedLocal.replace('T', ' '),
+    guest_timezone: guestTimezone,
+    guest_name: guestName,
+    guest_email: guestEmail,
+    guest_phone: input.guestPhone ?? input.guest_phone ?? null,
+    notes: input.notes ?? null,
+    idempotency_key: idempotencyKey,
+    requested_offset_minutes: requestedOffsetMinutes
+  };
+}
+
 function normalizeBookingInput(input = {}) {
   const ownerId = String(input.ownerId ?? input.owner_id ?? '').trim();
   const meetingTypeId = String(input.meetingTypeId ?? input.meeting_type_id ?? '').trim();
@@ -86,5 +117,6 @@ module.exports = {
   BookingValidationError,
   isValidTimezone,
   mapBooking,
+  normalizePublicBookingInput,
   normalizeBookingInput
 };

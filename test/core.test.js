@@ -18,6 +18,10 @@ function fakeRelationalClient() {
       tables.set(table, [...(tables.get(table) || []), ...created]);
       return created;
     },
+    async rpc(name, values) {
+      calls.push(['rpc', name, values]);
+      return [{ id: 'booking-1', owner_id: 'user-a', meeting_type_id: values.p_meeting_type_id, guest_name: values.p_guest_name, guest_email: values.p_guest_email }];
+    },
     async update(table, values, query) { calls.push(['update', table, values, query]); return [{ ...values }]; }
   };
 }
@@ -43,10 +47,11 @@ test('core repository always scopes writes to the authenticated owner', async ()
   const repo = createCoreRepository(client);
   await repo.createMeetingType('user-a', { nameAr: 'اجتماع', nameEn: 'Meeting', duration: 30 });
   await repo.replaceAvailability('user-a', { timezone: 'Asia/Riyadh' }, [{ weekday: 0, startLocal: '09:00', endLocal: '12:00' }, { weekday: 0, startLocal: '13:00', endLocal: '17:00' }]);
-  const booking = await repo.createBooking('user-a', { meetingTypeId: 'type-a', guestName: 'Guest', guestEmail: 'guest@example.com', startsAt: '2026-09-24T06:00:00Z', endsAt: '2026-09-24T06:30:00Z' });
+  const booking = await repo.createBooking('user-a', { profileSlug: 'ahmed', meetingTypeId: 'type-a', guestName: 'Guest', guestEmail: 'guest@example.com', guestTimezone: 'Asia/Riyadh', requestedLocal: '2026-09-24 09:00:00', requestedOffsetMinutes: 180, idempotencyKey: 'attempt-1234567890' });
   assert.equal(client.tables.get('meeting_types')[0].owner_id, 'user-a');
   assert.equal(client.tables.get('availability_schedules')[0].owner_id, 'user-a');
   assert.equal(client.tables.get('availability_intervals').length, 2);
   assert.equal(booking.owner_id, 'user-a');
+  assert.equal(client.calls.at(-1)[0], 'rpc');
   await assert.rejects(() => repo.getProfile(), /Authenticated owner id/);
 });

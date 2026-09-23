@@ -59,6 +59,10 @@ test('Supabase adapter lists only owner rows and does not silently fall back', a
     async list(table, query) {
       calls.push(['list', table, query]);
       return [{ id: 'booking-a', owner_id: 'owner-a', meeting_type_id: 'type-a', guest_name: 'Guest', guest_email: 'guest@example.com', starts_at: '2026-10-01T06:00:00.000Z', ends_at: '2026-10-01T06:30:00.000Z' }];
+    },
+    async rpc(name, values) {
+      calls.push(['rpc', name, values]);
+      return [{ id: 'booking-a', owner_id: 'owner-a', meeting_type_id: values.p_meeting_type_id, guest_name: values.p_guest_name, guest_email: values.p_guest_email, starts_at: '2026-10-01T06:00:00.000Z', ends_at: '2026-10-01T06:30:00.000Z', status: 'confirmed' }];
     }
   };
   const repository = createBookingRepository({ backend: 'supabase', supabaseClient: client });
@@ -66,7 +70,9 @@ test('Supabase adapter lists only owner rows and does not silently fall back', a
   const rows = await service.listOwnerBookings('owner-a');
   assert.equal(rows[0].owner_id, 'owner-a');
   assert.match(calls[0][2], /owner_id=eq\.owner-a/);
-  await assert.rejects(() => service.createBooking(canonicalInput()), BookingOperationUnavailableError);
+  const created = await service.createPublicBooking({ profileSlug: 'ahmed', meetingTypeId: 'type-a', requestedLocal: '2026-10-01 09:00:00', requestedOffsetMinutes: 180, guestTimezone: 'Asia/Riyadh', guestName: 'Guest', guestEmail: 'guest@example.com', idempotencyKey: 'attempt-1234567890' });
+  assert.equal(created.status, 'confirmed');
+  assert.equal(calls.at(-1)[0], 'rpc');
 });
 
 test('booking service delegates supported reads and preserves explicit unsupported operations', async () => {

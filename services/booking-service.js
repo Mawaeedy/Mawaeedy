@@ -1,4 +1,4 @@
-const { BookingOperationUnavailableError, normalizeBookingInput } = require('../core/booking');
+const { BookingOperationUnavailableError, normalizeBookingInput, normalizePublicBookingInput } = require('../core/booking');
 
 function createBookingService(repository) {
   if (!repository) throw new Error('Booking repository is required.');
@@ -17,6 +17,11 @@ function createBookingService(repository) {
         throw new BookingOperationUnavailableError('Supabase booking creation is intentionally unavailable before C2.');
       }
       return repository.createBooking(normalized.owner_id, normalized);
+    },
+    async createPublicBooking(input) {
+      const normalized = normalizePublicBookingInput(input);
+      if (typeof repository.createPublicBooking !== 'function') throw new BookingOperationUnavailableError('Public booking creation is unavailable.');
+      return repository.createPublicBooking(normalized);
     },
     async cancelBooking(ownerId, bookingId, input = {}) {
       if (!ownerId) throw new Error('Authenticated owner id is required.');

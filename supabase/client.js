@@ -20,7 +20,11 @@ async function request(table, options = {}) {
   const text = await response.text();
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-  if (!response.ok) throw new Error(`Supabase ${response.status}: ${body?.message || body?.hint || body || 'request failed'}`);
+  if (!response.ok) {
+    const error = new Error(`Supabase ${response.status}: ${body?.message || body?.hint || body || 'request failed'}`);
+    error.supabase = { status: response.status, code: body?.code || null, message: body?.message || null, hint: body?.hint || null };
+    throw error;
+  }
   return body;
 }
 
