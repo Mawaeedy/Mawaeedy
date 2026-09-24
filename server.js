@@ -18,6 +18,7 @@ const { createPkcePair, pkceVerifierCookie, clearPkceVerifierCookie } = require(
 const { ensureSupabaseSchedulingProfile } = require('./core/supabase-profile');
 const { buildGoogleCallbackUrl } = require('./core/public-url');
 const { createSessionToken, verifySessionToken, createSessionCookie } = require('./core/auth-session');
+const { bookingFailureDiagnostic } = require('./core/booking-diagnostics');
 
 const app = express();
 const sessions = new Map();
@@ -375,16 +376,21 @@ app.post('/api/bookings', async (req, res) => {
   }
 
   if (config.useSupabase) {
+    let stage = 'public-profile';
     try {
       const publicState = await persistence.getPublicProfileBySlug(profileSlug);
       if (!publicState) return res.status(404).json({ error: 'INVALID_INPUT' });
+      stage = 'meeting-type';
       const meetingType = publicState.meetingTypes.find(item => String(item.id) === meetingTypeId || String(item.supabaseId) === meetingTypeId);
       if (!meetingType?.supabaseId) return res.status(404).json({ error: 'INACTIVE_MEETING_TYPE' });
+      stage = 'resolve-time';
       const hostTimezone = publicState.availability?.schedule?.timezone || publicState.profile.timezone;
       const resolved = resolveLocalWallClock(`${date} ${time}:00`, hostTimezone);
       if (resolved.status !== 'resolved') return res.status(400).json({ error: 'INVALID_LOCAL_TIME' });
+      stage = 'management-token';
       const manageToken = deriveManageToken(idempotencyKey, config.manageTokenSecret);
       const manageTokenHash = hashManageToken(manageToken);
+      stage = 'booking-rpc';
       const booking = await bookingService.createPublicBooking({
         profileSlug,
         meetingTypeId: meetingType.supabaseId,
@@ -398,9 +404,11 @@ app.post('/api/bookings', async (req, res) => {
         idempotencyKey,
         manageTokenHash
       });
+      stage = 'booking-response';
       return res.status(201).json(publicBookingResponse(booking, meetingType, hostTimezone, manageToken));
     } catch (error) {
       if (error instanceof BookingValidationError) return res.status(400).json({ error: 'INVALID_INPUT' });
+      console.error('[public-booking-failed]', bookingFailureDiagnostic(error, stage));
       return sendBookingError(res, error);
     }
   }
