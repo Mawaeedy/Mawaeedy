@@ -380,7 +380,8 @@ app.post('/api/bookings', async (req, res) => {
       if (!publicState) return res.status(404).json({ error: 'INVALID_INPUT' });
       const meetingType = publicState.meetingTypes.find(item => String(item.id) === meetingTypeId || String(item.supabaseId) === meetingTypeId);
       if (!meetingType?.supabaseId) return res.status(404).json({ error: 'INACTIVE_MEETING_TYPE' });
-      const resolved = resolveLocalWallClock(`${date} ${time}:00`, publicState.profile.timezone);
+      const hostTimezone = publicState.availability?.schedule?.timezone || publicState.profile.timezone;
+      const resolved = resolveLocalWallClock(`${date} ${time}:00`, hostTimezone);
       if (resolved.status !== 'resolved') return res.status(400).json({ error: 'INVALID_LOCAL_TIME' });
       const manageToken = deriveManageToken(idempotencyKey, config.manageTokenSecret);
       const manageTokenHash = hashManageToken(manageToken);
@@ -397,7 +398,7 @@ app.post('/api/bookings', async (req, res) => {
         idempotencyKey,
         manageTokenHash
       });
-      return res.status(201).json(publicBookingResponse(booking, meetingType, publicState.profile.timezone, manageToken));
+      return res.status(201).json(publicBookingResponse(booking, meetingType, hostTimezone, manageToken));
     } catch (error) {
       if (error instanceof BookingValidationError) return res.status(400).json({ error: 'INVALID_INPUT' });
       return sendBookingError(res, error);

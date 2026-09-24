@@ -52,6 +52,16 @@ test('server-side timezone resolution accepts Riyadh and rejects DST gaps/ambigu
   assert.equal(resolveLocalWallClock('2026-11-01 01:30:00', 'America/New_York').status, 'ambiguous');
 });
 
+test('Supabase booking creation resolves and returns times in the saved schedule timezone', () => {
+  const source = fs.readFileSync('server.js', 'utf8');
+  const start = source.indexOf("app.post('/api/bookings'");
+  const end = source.indexOf("app.get('/api/availability'", start);
+  const route = source.slice(start, end);
+  assert.match(route, /const hostTimezone = publicState\.availability\?\.schedule\?\.timezone \|\| publicState\.profile\.timezone/);
+  assert.match(route, /resolveLocalWallClock\(`\$\{date\} \$\{time\}:00`, hostTimezone\)/);
+  assert.match(route, /publicBookingResponse\(booking, meetingType, hostTimezone, manageToken\)/);
+});
+
 test('browser booking attempt creates a key and sends only guest scheduling inputs', () => {
   const app = fs.readFileSync('app.js', 'utf8');
   assert.match(app, /newBookingAttemptKey/);
