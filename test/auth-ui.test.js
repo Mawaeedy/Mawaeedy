@@ -16,3 +16,8 @@ test('public booking renders a clear empty state when a host has no active meeti
   assert.match(client, /No meeting types are available to book right now/);
   assert.doesNotMatch(client, /d\.meetingTypes\[0\]\.(?:en|duration|mode)/);
 });
+
+test('public booking displays the saved availability schedule timezone as the host timezone', () => {
+  const client = fs.readFileSync('app.js', 'utf8');
+  assert.match(client, /id="chosenTimezone">\$\{esc\(d\.availability\?\.schedule\?\.timezone/);
+});
