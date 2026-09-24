@@ -86,7 +86,7 @@ function createSqliteAdapter(db) {
       const data = state();
       if (String(data.profile?.slug || 'ahmed') !== String(slug)) return null;
       const ownerId = data.users?.[0]?.id || 'owner';
-      return { profile: publicProfile({ ...data.profile, slug }), meetingTypes: (data.meetingTypes || []).filter(item => item.active !== false), availability: await this.getPublicAvailability(ownerId) };
+      return { ownerId, profile: publicProfile({ ...data.profile, slug }), meetingTypes: (data.meetingTypes || []).filter(item => item.active !== false), availability: await this.getPublicAvailability(ownerId) };
     },
     async updateProfile(ownerId, changes) {
       const data = state();
@@ -256,7 +256,7 @@ function createSupabaseAdapter(client) {
       const rows = await client.list('profiles', `?slug=eq.${encodeURIComponent(slug)}&select=name,photo,bio,job_title,timezone,slug,id&limit=1`);
       const row = rows[0];
       if (!row) return null;
-      return { profile: publicProfile(row), meetingTypes: await listMeetingTypes(row.id, true), availability: await this.getPublicAvailability(row.id) };
+      return { ownerId: row.id, profile: publicProfile(row), meetingTypes: await listMeetingTypes(row.id, true), availability: await this.getPublicAvailability(row.id) };
     },
     async updateProfile(ownerId, changes) {
       const normalized = validateProfilePatch(changes);

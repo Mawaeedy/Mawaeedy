@@ -19,6 +19,7 @@ const { ensureSupabaseSchedulingProfile } = require('./core/supabase-profile');
 const { buildGoogleCallbackUrl } = require('./core/public-url');
 const { createSessionToken, verifySessionToken, createSessionCookie } = require('./core/auth-session');
 const { bookingFailureDiagnostic } = require('./core/booking-diagnostics');
+const { publicAvailabilitySlots } = require('./core/public-availability');
 
 const app = express();
 const sessions = new Map();
@@ -445,7 +446,28 @@ app.get('/api/availability/overrides', requireAuth, async (req, res) => { try { 
 app.post('/api/availability/overrides', requireAuth, async (req, res) => { try { const row = await persistence.createAvailabilityOverride(req.userId, req.body || {}); if (!row) return res.status(404).json({ error: 'Availability schedule not found.' }); res.status(201).json(row); } catch (error) { res.status(400).json({ error: error.message }); } });
 app.patch('/api/availability/overrides/:id', requireAuth, async (req, res) => { try { const row = await persistence.updateAvailabilityOverride(req.userId, req.params.id, req.body || {}); if (!row) return res.status(404).json({ error: 'Availability override not found.' }); res.json(row); } catch (error) { res.status(400).json({ error: error.message }); } });
 app.delete('/api/availability/overrides/:id', requireAuth, async (req, res) => { try { const row = await persistence.deleteAvailabilityOverride(req.userId, req.params.id); if (!row) return res.status(404).json({ error: 'Availability override not found.' }); res.json(row); } catch (error) { res.status(503).json({ error: 'Availability override could not be deleted.', detail: error.message }); } });
-app.get('/api/availability/slots', async (req, res) => { try { const date = String(req.query.date || ''); const slug = String(req.query.slug || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !slug) return res.status(400).json({ error: 'A date and public profile slug are required.' }); const publicState = await persistence.getPublicProfileBySlug(slug); if (!publicState) return res.status(404).json({ error: 'Scheduling profile not found.' }); const timezone = publicState.availability.schedule?.timezone || publicState.profile.timezone; if (!publicState.availability.schedule) return res.json({ date, timezone, slots: [], reason: 'availability-not-configured' }); const day = new Date(`${date}T12:00:00Z`).getUTCDay(); const override = publicState.availability.overrides.find(item => item.overrideDate === date); if (override && !override.isAvailable) return res.json({ date, timezone, slots: [] }); const intervals = override?.isAvailable ? [{ weekday: day, startLocal: override.startLocal, endLocal: override.endLocal }] : publicState.availability.intervals.filter(item => item.weekday === day); const slots = []; for (const interval of intervals) { let minutes = Number(interval.startLocal.slice(0, 2)) * 60 + Number(interval.startLocal.slice(3)); const end = Number(interval.endLocal.slice(0, 2)) * 60 + Number(interval.endLocal.slice(3)); while (minutes < end) { slots.push(`${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`); minutes += 30; } } return res.json({ date, timezone, slots: [...new Set(slots)] }); } catch (error) { return res.status(503).json({ error: 'Public availability is unavailable.', detail: error.message }); } });
+app.get('/api/availability/slots', async (req, res) => {
+  try {
+    const date = String(req.query.date || '');
+    const slug = String(req.query.slug || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !slug) return res.status(400).json({ error: 'A date and public profile slug are required.' });
+    const publicState = await persistence.getPublicProfileBySlug(slug);
+    if (!publicState) return res.status(404).json({ error: 'Scheduling profile not found.' });
+    const timezone = publicState.availability.schedule?.timezone || publicState.profile.timezone;
+    if (!publicState.availability.schedule) return res.json({ date, timezone, slots: [], reason: 'availability-not-configured' });
+    const requestedTypeId = String(req.query.meetingTypeId || req.query.meeting_type_id || publicState.meetingTypes[0]?.id || '');
+    const selectedType = publicState.meetingTypes.find(type => String(type.id) === requestedTypeId || String(type.supabaseId) === requestedTypeId);
+    if (!selectedType) return res.status(404).json({ error: 'INACTIVE_MEETING_TYPE' });
+    const [meetingTypes, bookings] = await Promise.all([
+      persistence.listMeetingTypes(publicState.ownerId),
+      bookingService.listOwnerBookings(publicState.ownerId, { status: 'confirmed' })
+    ]);
+    const slots = publicAvailabilitySlots({ date, timezone, availability: publicState.availability, bookings, meetingTypes, meetingTypeId: requestedTypeId });
+    return res.json({ date, timezone, slots });
+  } catch (error) {
+    return res.status(503).json({ error: 'Public availability is unavailable.', detail: error.message });
+  }
+});
 app.get('/api/meeting-types', async (req, res) => { try { const ownerId = currentUser(req); if (!ownerId) return res.status(401).json({ error: 'Authentication required.' }); return res.json(await persistence.listMeetingTypes(ownerId)); } catch (error) { return res.status(503).json({ error: 'Meeting types are unavailable.', detail: error.message }); } });
 app.patch('/api/meeting-types/:id', async (req, res) => { try { const ownerId = currentUser(req); if (!ownerId) return res.status(401).json({ error: 'Authentication required.' }); const result = await persistence.updateMeetingType(ownerId, req.params.id, req.body || {}); if (!result) return res.status(404).json({ error: 'Meeting type not found.' }); return res.json(result); } catch (error) { return res.status(400).json({ error: error.message }); } });
 app.delete('/api/meeting-types/:id', async (req, res) => { try { const ownerId = currentUser(req); if (!ownerId) return res.status(401).json({ error: 'Authentication required.' }); const result = await persistence.deactivateMeetingType(ownerId, req.params.id); if (!result) return res.status(404).json({ error: 'Meeting type not found.' }); return res.json(result); } catch (error) { return res.status(503).json({ error: 'Meeting type could not be deactivated.', detail: error.message }); } });

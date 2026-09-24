@@ -62,6 +62,29 @@ test('Supabase booking creation resolves and returns times in the saved schedule
   assert.match(route, /publicBookingResponse\(booking, meetingType, hostTimezone, manageToken\)/);
 });
 
+test('public slot availability filters confirmed bookings using occupied ranges and selected meeting duration', () => {
+  const { publicAvailabilitySlots } = require('../core/public-availability');
+  const base = {
+    date: '2026-09-27', timezone: 'Asia/Baghdad',
+    availability: { schedule: { timezone: 'Asia/Baghdad' }, intervals: [{ weekday: 0, startLocal: '09:00', endLocal: '12:00' }], overrides: [] },
+    meetingTypes: [{ id: 'type-30', duration: 30, active: true, bufferBeforeMinutes: 0, bufferAfterMinutes: 0 }, { id: 'type-60', duration: 60, active: true, bufferBeforeMinutes: 0, bufferAfterMinutes: 0 }],
+    bookings: [{ id: 'existing', status: 'confirmed', starts_at: '2026-09-27T06:00:00.000Z', ends_at: '2026-09-27T06:30:00.000Z', occupied_starts_at: '2026-09-27T06:00:00.000Z', occupied_ends_at: '2026-09-27T06:30:00.000Z' }, { id: 'cancelled', status: 'cancelled', starts_at: '2026-09-27T06:30:00.000Z', ends_at: '2026-09-27T07:00:00.000Z', occupied_starts_at: '2026-09-27T06:30:00.000Z', occupied_ends_at: '2026-09-27T07:00:00.000Z' }]
+  };
+  assert.deepEqual(publicAvailabilitySlots({ ...base, meetingTypeId: 'type-30' }), ['09:30', '10:00', '10:30', '11:00', '11:30']);
+  assert.deepEqual(publicAvailabilitySlots({ ...base, meetingTypeId: 'type-60' }), ['09:30', '10:00', '10:30', '11:00']);
+});
+
+test('public availability request is owner-scoped and refreshed when the guest changes meeting type', () => {
+  const repository = fs.readFileSync('persistence/repository.js', 'utf8');
+  const serverSource = fs.readFileSync('server.js', 'utf8');
+  const client = fs.readFileSync('app.js', 'utf8');
+  assert.match(repository, /return \{ ownerId: row\.id, profile: publicProfile\(row\)/);
+  assert.match(serverSource, /bookingService\.listOwnerBookings\(publicState\.ownerId, \{ status: 'confirmed' \}\)/);
+  assert.match(serverSource, /publicAvailabilitySlots\(\{ date, timezone, availability: publicState\.availability, bookings, meetingTypes, meetingTypeId: requestedTypeId \}\)/);
+  assert.match(client, /meetingTypeId=\$\{encodeURIComponent\(meetingTypeId\|\|''\)\}/);
+  assert.match(client, /e\.target\.id === 'typeSelect'.*syncGuestSlots\(date, e\.target\.value\)/);
+});
+
 test('browser booking attempt creates a key and sends only guest scheduling inputs', () => {
   const app = fs.readFileSync('app.js', 'utf8');
   assert.match(app, /newBookingAttemptKey/);

@@ -108,6 +108,8 @@ function mapBooking(row, ownerId) {
     ...mapped,
     id: row.id,
     status: row.status || 'confirmed',
+    occupied_starts_at: row.occupied_starts_at || null,
+    occupied_ends_at: row.occupied_ends_at || null,
     created_at: row.created_at || mapped.created_at,
     updated_at: row.updated_at || mapped.updated_at
   };
