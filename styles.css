@@ -14,3 +14,4 @@
 #bookingList .booking-action{min-height:40px;white-space:nowrap}
 @media(max-width:700px){#bookingList .team-row{align-items:flex-start;gap:12px}#bookingList .team-row > span:last-child{justify-content:flex-start;width:100%}}
 .availability-modal{width:min(720px,94vw);max-height:90vh;overflow:auto}.availability-days{display:grid;gap:10px;margin:18px 0}.availability-day{border:1px solid var(--line);border-radius:10px;padding:12px}.availability-day-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.availability-day-head label{font-weight:600}.intervals{display:grid;gap:8px;margin-top:10px}.interval-row{display:flex;align-items:center;gap:8px}.interval-row input{min-width:0;flex:1;border:1px solid var(--line);border-radius:8px;padding:8px}.interval-row .outline{min-width:40px}.availability-empty-hint{margin-top:6px}
+.field[hidden]{display:none!important}
