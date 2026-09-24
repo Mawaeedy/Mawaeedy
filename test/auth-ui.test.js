@@ -21,3 +21,10 @@ test('public booking displays the saved availability schedule timezone as the ho
   const client = fs.readFileSync('app.js', 'utf8');
   assert.match(client, /id="chosenTimezone">\$\{esc\(d\.availability\?\.schedule\?\.timezone/);
 });
+
+test('guest booking-management token state is initialized before route dispatch', () => {
+  const client = fs.readFileSync('app.js', 'utf8');
+  const tokenDeclaration = client.indexOf('let guestManageToken = null;');
+  const routeDispatch = client.indexOf("if(location.pathname.startsWith('/manage/')){loadManagePage()}");
+  assert.ok(tokenDeclaration >= 0 && tokenDeclaration < routeDispatch);
+});

@@ -33,9 +33,9 @@ function profileSettingsModal(){const d=state;document.body.insertAdjacentHTML('
 function settingsModal(kind){return kind==='availability'?availabilityModal():profileSettingsModal();}
 async function loadDashboard(){try{await api('/api/auth/me')}catch{location.href='/login';return}state=await api('/api/state');dashboard();renderUpcomingBookings();loadCalendarPreview()}
 async function loadCalendarPreview(){const target=document.querySelector('.integrations');if(!target||document.querySelector('#calendarPreview'))return;const card=document.createElement('section');card.className='card';card.id='calendarPreview';card.innerHTML='<div class="section-head"><h2>Google Calendar</h2><span class="eyebrow">آخر المواعيد</span></div><div class="list"><p class="muted">جارٍ تحميل أحداث التقويم...</p></div>';target.parentNode.insertBefore(card,target.nextSibling);try{const data=await api('/api/calendar/google/events');const events=(data.events||[]).slice(0,5);card.querySelector('.list').innerHTML=events.length?events.map(event=>{const start=event.start?.dateTime||event.start?.date||'';return `<div class="team-row"><div><b>${esc(event.summary||'Google Calendar event')}</b><div class="eyebrow">${esc(start.replace('T',' ').slice(0,16))}</div></div><span class="dot"></span></div>`}).join(''):'<p class="muted">لا توجد أحداث قادمة.</p>'}catch(error){card.querySelector('.list').innerHTML='<p class="muted">Google Calendar غير متصل بعد. اربط التقويم لعرض مواعيدك الحقيقية هنا.</p>'}}
+let guestManageToken = null;
 if(location.pathname.startsWith('/manage/')){loadManagePage()}else if(location.pathname==='/booking.html' || location.pathname.startsWith('/book/')){loadBooking()}else{loadDashboard()}
 
-let guestManageToken = null;
 async function loadManagePage(){
   const match=location.pathname.match(/^\/manage\/([^/]+)$/); if(!match){app.innerHTML='<main class="booking-page"><h1>رابط إدارة الموعد غير صالح</h1></main>';return}
   const fragment=new URLSearchParams(location.hash.slice(1)); guestManageToken=fragment.get('token'); history.replaceState(null,'',location.pathname);
