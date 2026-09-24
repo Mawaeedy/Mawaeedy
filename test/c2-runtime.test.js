@@ -83,6 +83,9 @@ test('public availability request is owner-scoped and refreshed when the guest c
   assert.match(serverSource, /publicAvailabilitySlots\(\{ date, timezone, availability: publicState\.availability, bookings, meetingTypes, meetingTypeId: requestedTypeId \}\)/);
   assert.match(client, /meetingTypeId=\$\{encodeURIComponent\(meetingTypeId\|\|''\)\}/);
   assert.match(client, /e\.target\.id === 'typeSelect'.*syncGuestSlots\(date, e\.target\.value\)/);
+  assert.match(client, /id="guestBookingSummary"/);
+  assert.match(client, /const updated=await api\(`\/api\/bookings\/\$\{encodeURIComponent\(id\)\}\/guest\/reschedule`/);
+  assert.match(client, /updatedLocal\.date.*updatedLocal\.time/);
 });
 
 test('browser booking attempt creates a key and sends only guest scheduling inputs', () => {
