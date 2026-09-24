@@ -46,7 +46,7 @@ async function publicState(ownerId = null, slug = null) {
       bio: profile.bio || '',
       photo: profile.photo || '👨🏻‍💼',
       timezone: profile.timezone || 'Asia/Riyadh',
-      slug: profile.slug || 'ahmed'
+      slug: profile.slug || ''
     },
     meetingTypes,
     availability: availabilityMap,

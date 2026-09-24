@@ -15,6 +15,7 @@ const { resolveLocalWallClock } = require('./core/timezone');
 const { normalizeIntervals } = require('./core/validation');
 const { deriveManageToken, hashManageToken } = require('./core/manage-token');
 const { createPkcePair, pkceVerifierCookie, clearPkceVerifierCookie } = require('./core/supabase-oauth');
+const { ensureSupabaseSchedulingProfile } = require('./core/supabase-profile');
 
 const app = express();
 const sessions = new Map();
@@ -47,7 +48,7 @@ const seed = {
 };
 function readData() { try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { fs.writeFileSync(DATA_FILE, JSON.stringify(seed, null, 2)); return structuredClone(seed); } }
 function writeData(d) { fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2)); }
-db.init(seed);
+if (!config.useSupabase) db.init(seed);
 function readData() { return db.read(); }
 function writeData(d) { db.write(d); }
 function bookingOverlaps(d, candidateDate, candidateTime, candidateDuration, ignoreId) { const start = Number(candidateTime.slice(0,2))*60 + Number(candidateTime.slice(3)); const end = start + candidateDuration + Number(d.bookingRules?.bufferMinutes || 0); return d.bookings.some(existing => { if (existing.id === ignoreId || existing.status === 'cancelled' || existing.date !== candidateDate) return false; const type = d.meetingTypes.find(x => x.id === existing.meetingTypeId); const existingStart = Number(existing.time.slice(0,2))*60 + Number(existing.time.slice(3)); const existingEnd = existingStart + Number(type?.duration || 30) + Number(d.bookingRules?.bufferMinutes || 0); return start < existingEnd && existingStart < end; }); }
@@ -146,6 +147,7 @@ app.use(async (req, res, next) => {
   try {
     const authPath = req.path.startsWith('/api/auth/');
     const authenticatedUserId = currentUser(req);
+    if (!authPath && !authenticatedUserId) return res.status(401).json({ error: 'Authentication required.' });
     const owner = authPath ? null : await supabaseState.ownerProfile(authenticatedUserId);
     if (config.useSupabase && req.path === '/api/auth/google' && req.method === 'GET') {
       const { verifier, challenge } = createPkcePair();
@@ -168,8 +170,7 @@ app.use(async (req, res, next) => {
       const auth = await client.authExchange(req.query.code, codeVerifier);
       if (!auth.user?.id) return res.status(502).send('Google sign-in did not return a user.');
       const token = sessionToken(auth.user.id); sessions.set(token, auth.user.id);
-      const existing = await client.list('profiles', `?id=eq.${encodeURIComponent(auth.user.id)}&select=id`);
-      if (!existing.length) await client.insert('profiles', { id: auth.user.id, name: auth.user.user_metadata?.full_name || auth.user.email || 'Mawaeedy user', timezone: 'Asia/Riyadh' });
+      await ensureSupabaseSchedulingProfile(client, auth.user);
       res.setHeader('Set-Cookie', [sessionCookie(token), clearPkceVerifierCookie(config.isProduction)]);
       return res.redirect('/');
     }
@@ -177,7 +178,7 @@ app.use(async (req, res, next) => {
       const { email, password, name } = req.body || {};
       if (!email || !password || !name) return res.status(400).json({ error: 'Name, email, and password are required.' });
       const auth = await client.authRequest('signup', { email, password, data: { name } });
-      if (auth.user?.id) await client.insert('profiles', { id: auth.user.id, name, timezone: 'Asia/Riyadh', slug: `${String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'user'}-${String(auth.user.id).slice(0, 8)}` });
+      if (auth.user?.id) await ensureSupabaseSchedulingProfile(client, { ...auth.user, email: auth.user.email || email, user_metadata: { ...(auth.user.user_metadata || {}), name } });
       return res.status(201).json({ id: auth.user?.id, email: auth.user?.email || email, name });
     }
     if (req.path === '/api/auth/login' && req.method === 'POST') {
@@ -186,9 +187,19 @@ app.use(async (req, res, next) => {
       const auth = await client.authRequest('token?grant_type=password', { email, password });
       const userId = auth.user?.id;
       if (!userId) return res.status(401).json({ error: 'Invalid email or password.' });
+      await ensureSupabaseSchedulingProfile(client, auth.user);
       const token = sessionToken(userId); sessions.set(token, userId);
       res.setHeader('Set-Cookie', sessionCookie(token));
       return res.json({ ok: true, user: { id: userId, email: auth.user.email, name: auth.user.user_metadata?.name || auth.user.email } });
+    }
+    if (req.path === '/api/auth/logout' && req.method === 'POST') {
+      const token = cookieValue(req, 'calpro_session');
+      if (token) { sessions.delete(token); revokedSessions.add(token); }
+      res.setHeader('Set-Cookie', sessionCookie('', 0));
+      return res.json({ ok: true });
+    }
+    if (req.path === '/api/auth/reset-password' && req.method === 'POST') {
+      return res.status(501).json({ error: 'Password reset is unavailable until a verified Supabase recovery flow is configured.' });
     }
     if (req.path === '/api/auth/me' && req.method === 'GET') {
       const userId = currentUser(req); if (!userId) return res.status(401).json({ error: 'Authentication required.' });
@@ -208,6 +219,16 @@ app.use(async (req, res, next) => {
       const body = req.body || {};
       const meetingType = await persistence.createMeetingType(currentUser(req), body);
       return res.status(201).json(meetingType);
+    }
+    if (config.useSupabase && req.path.startsWith('/api/')) {
+      const supportedMutation =
+        (req.method === 'PUT' && req.path === '/api/availability') ||
+        (req.method === 'POST' && req.path === '/api/availability/overrides') ||
+        (req.method === 'PATCH' && /^\/api\/availability\/overrides\/[^/]+$/.test(req.path)) ||
+        (req.method === 'DELETE' && /^\/api\/availability\/overrides\/[^/]+$/.test(req.path)) ||
+        (req.method === 'POST' && /^\/api\/bookings\/[^/]+\/(?:cancel|reschedule)$/.test(req.path)) ||
+        (req.method === 'PATCH' && /^\/api\/bookings\/[^/]+$/.test(req.path));
+      if (!supportedMutation) return res.status(501).json({ error: 'This operation is not available with Supabase persistence.' });
     }
     next();
   } catch (error) { return res.status(503).json({ error: 'Unable to save data to Supabase.', detail: error.message }); }
