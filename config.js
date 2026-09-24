@@ -16,4 +16,5 @@ const sessionSecret = process.env.SESSION_SECRET || (!isProduction ? process.env
 const tokenEncryptionKey = process.env.GOOGLE_TOKEN_ENCRYPTION_KEY || (!isProduction ? 'local-development-only-change-me' : null);
 const manageTokenSecret = process.env.MANAGE_TOKEN_SECRET || (!isProduction ? 'local-development-manage-token-secret-change-me' : null);
 if (isProduction && (!sessionSecret || !tokenEncryptionKey || !manageTokenSecret)) throw new Error('SESSION_SECRET, GOOGLE_TOKEN_ENCRYPTION_KEY, and MANAGE_TOKEN_SECRET must be configured in production.');
-module.exports = { googleClientId: process.env.GOOGLE_CLIENT_ID, googleClientSecret: process.env.GOOGLE_CLIENT_SECRET, googleRedirectUri: process.env.GOOGLE_REDIRECT_URI, useSupabase: persistenceBackend === 'supabase', persistenceBackend, resolvePersistenceBackend, isProduction, tokenEncryptionKey, sessionSecret, manageTokenSecret };
+const publicAppUrl = process.env.PUBLIC_APP_URL || null;
+module.exports = { googleClientId: process.env.GOOGLE_CLIENT_ID, googleClientSecret: process.env.GOOGLE_CLIENT_SECRET, googleRedirectUri: process.env.GOOGLE_REDIRECT_URI, publicAppUrl, useSupabase: persistenceBackend === 'supabase', persistenceBackend, resolvePersistenceBackend, isProduction, tokenEncryptionKey, sessionSecret, manageTokenSecret };

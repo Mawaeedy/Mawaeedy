@@ -16,6 +16,8 @@ const { normalizeIntervals } = require('./core/validation');
 const { deriveManageToken, hashManageToken } = require('./core/manage-token');
 const { createPkcePair, pkceVerifierCookie, clearPkceVerifierCookie } = require('./core/supabase-oauth');
 const { ensureSupabaseSchedulingProfile } = require('./core/supabase-profile');
+const { buildGoogleCallbackUrl } = require('./core/public-url');
+const { createSessionToken, verifySessionToken, createSessionCookie } = require('./core/auth-session');
 
 const app = express();
 const sessions = new Map();
@@ -56,9 +58,9 @@ function bookingOutsideRules(d, date, time) { const rules = d.bookingRules || { 
 function hashPassword(password) { const salt = crypto.randomBytes(16).toString('hex'); const hash = crypto.scryptSync(password, salt, 64).toString('hex'); return `scrypt$${salt}$${hash}`; }
 function verifyPassword(password, stored) { if (!stored?.startsWith('scrypt$')) return stored === password; const [, salt, hash] = stored.split('$'); const actual = crypto.scryptSync(password, salt, 64).toString('hex'); return crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(hash, 'hex')); }
 function cookieValue(req, name) { const raw = req.headers.cookie || ''; const item = raw.split(';').map(x => x.trim()).find(x => x.startsWith(`${name}=`)); return item ? decodeURIComponent(item.slice(name.length + 1)) : null; }
-function sessionCookie(token, maxAge = 604800) { return `calpro_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${config.isProduction ? '; Secure' : ''}`; }
-function sessionToken(userId) { const payload = `${userId}.${Date.now()}`; const signature = crypto.createHmac('sha256', config.sessionSecret).update(payload).digest('hex'); return `${payload}.${signature}`; }
-function sessionUser(token) { const parts = String(token || '').split('.'); if (parts.length !== 3) return null; const [userId, issued, signature] = parts; if (!userId || !/^\d+$/.test(issued) || Date.now() - Number(issued) > 604800000) return null; const expected = crypto.createHmac('sha256', config.sessionSecret).update(`${userId}.${issued}`).digest('hex'); return signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)) ? userId : null; }
+function sessionCookie(token, maxAge = 604800) { return createSessionCookie(token, maxAge, config.isProduction); }
+function sessionToken(userId) { return createSessionToken(userId, config.sessionSecret); }
+function sessionUser(token) { return verifySessionToken(token, config.sessionSecret); }
 function currentUser(req) { const token = cookieValue(req, 'calpro_session'); if (!token || revokedSessions.has(token)) return null; return sessions.get(token) || sessionUser(token); }
 function requireAuth(req, res, next) { const userId = currentUser(req); if (!userId) return res.status(401).json({ error: 'Authentication required.' }); req.userId = userId; next(); }
 const bookingBusinessErrors = new Set(['SLOT_TAKEN', 'OUTSIDE_AVAILABILITY', 'DATE_UNAVAILABLE', 'INACTIVE_MEETING_TYPE', 'INVALID_TIMEZONE', 'INVALID_LOCAL_TIME', 'TOO_SOON', 'BEYOND_BOOKING_HORIZON', 'IDEMPOTENCY_CONFLICT', 'INVALID_INPUT']);
@@ -151,7 +153,13 @@ app.use(async (req, res, next) => {
     const owner = authPath ? null : await supabaseState.ownerProfile(authenticatedUserId);
     if (config.useSupabase && req.path === '/api/auth/google' && req.method === 'GET') {
       const { verifier, challenge } = createPkcePair();
-      const redirectTo = `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+      const redirectTo = buildGoogleCallbackUrl({
+        publicAppUrl: config.publicAppUrl,
+        isProduction: config.isProduction,
+        forwardedProto: req.get('x-forwarded-proto'),
+        requestProtocol: req.protocol,
+        host: req.get('host')
+      });
       const { url } = client.supabaseAuthConfig();
       res.setHeader('Set-Cookie', pkceVerifierCookie(verifier, config.isProduction));
       const authorizeUrl = new URL(`${url}/auth/v1/authorize`);
