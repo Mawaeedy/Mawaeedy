@@ -280,16 +280,18 @@ app.get('/api/notification-preferences', requireAuth, async (req, res) => {
 });
 app.put('/api/notification-preferences', requireAuth, async (req, res) => {
   try {
-    const values = { email: req.body?.email === true, whatsapp: false, sms: false };
+    const email = req.body?.email === true;
     if (!config.useSupabase) {
-      const data = readData(); data.availability.notifications = values.email ? 'email' : ''; writeData(data);
-      return res.json(values);
+      const data = readData(); const channels = new Set(String(data.availability.notifications ?? 'email').split(',').filter(Boolean));
+      if (email) channels.add('email'); else channels.delete('email');
+      data.availability.notifications = [...channels].join(','); writeData(data);
+      return res.json({ email, whatsapp: channels.has('whatsapp'), sms: channels.has('sms') });
     }
     const query = `?owner_id=eq.${encodeURIComponent(req.userId)}`;
     const existing = await supabaseClient.list('notification_preferences', `${query}&select=owner_id&limit=1`);
-    if (existing.length) await supabaseClient.update('notification_preferences', { ...values, updated_at: new Date().toISOString() }, query);
-    else await supabaseClient.insert('notification_preferences', { owner_id: req.userId, ...values });
-    res.json(values);
+    if (existing.length) await supabaseClient.update('notification_preferences', { email, updated_at: new Date().toISOString() }, query);
+    else await supabaseClient.insert('notification_preferences', { owner_id: req.userId, email });
+    res.json({ email });
   } catch { res.status(503).json({ error: 'Notification preferences could not be saved.' }); }
 });
 app.get('/api/integrations/google-calendar/status', requireAuth, async (req, res) => {
