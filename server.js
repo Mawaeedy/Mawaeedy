@@ -20,6 +20,7 @@ const { buildGoogleCallbackUrl } = require('./core/public-url');
 const { createSessionToken, verifySessionToken, createSessionCookie } = require('./core/auth-session');
 const { bookingFailureDiagnostic } = require('./core/booking-diagnostics');
 const { publicAvailabilitySlots } = require('./core/public-availability');
+const { seal, open } = require('./core/google-calendar-connection');
 
 const app = express();
 const sessions = new Map();
@@ -163,12 +164,19 @@ app.use(async (req, res, next) => {
         host: req.get('host')
       });
       const { url } = client.supabaseAuthConfig();
-      res.setHeader('Set-Cookie', pkceVerifierCookie(verifier, config.isProduction));
+      const calendarConnect = req.query.calendar === '1';
+      if (calendarConnect && !authenticatedUserId) return res.status(401).json({ error: 'Authentication required.' });
+      res.setHeader('Set-Cookie', [pkceVerifierCookie(verifier, config.isProduction), `calpro_calendar_connect=${calendarConnect ? '1' : '0'}; HttpOnly; SameSite=Lax; Path=/api/auth/google/callback; Max-Age=600${config.isProduction ? '; Secure' : ''}`]);
       const authorizeUrl = new URL(`${url}/auth/v1/authorize`);
       authorizeUrl.searchParams.set('provider', 'google');
       authorizeUrl.searchParams.set('redirect_to', redirectTo);
       authorizeUrl.searchParams.set('code_challenge', challenge);
       authorizeUrl.searchParams.set('code_challenge_method', 's256');
+      if (calendarConnect) {
+        authorizeUrl.searchParams.set('scopes', 'https://www.googleapis.com/auth/calendar.readonly');
+        authorizeUrl.searchParams.set('access_type', 'offline');
+        authorizeUrl.searchParams.set('prompt', 'consent');
+      }
       return res.redirect(authorizeUrl.toString());
     }
     if (config.useSupabase && req.path === '/api/auth/google/callback' && req.method === 'GET') {
@@ -179,9 +187,25 @@ app.use(async (req, res, next) => {
       }
       const auth = await client.authExchange(req.query.code, codeVerifier);
       if (!auth.user?.id) return res.status(502).send('Google sign-in did not return a user.');
+      const calendarConnect = cookieValue(req, 'calpro_calendar_connect') === '1';
+      if (calendarConnect) {
+        if (currentUser(req) !== auth.user.id) return res.status(403).send('Calendar account must match the signed-in host.');
+        if (!auth.provider_token) return res.status(502).send('Google Calendar permission was not granted.');
+        const permissionCheck = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1', { headers: { Authorization: `Bearer ${auth.provider_token}` } });
+        if (!permissionCheck.ok) return res.status(403).send('Google Calendar read permission was not granted.');
+        const existing = await client.list('integrations', `?owner_id=eq.${encodeURIComponent(auth.user.id)}&provider=eq.google&select=id,refresh_token_encrypted&limit=1`);
+        const values = {
+          access_token_encrypted: seal(auth.provider_token, config.tokenEncryptionKey),
+          refresh_token_encrypted: auth.provider_refresh_token ? seal(auth.provider_refresh_token, config.tokenEncryptionKey) : existing[0]?.refresh_token_encrypted || null,
+          expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          metadata: { scope: 'calendar.readonly' }
+        };
+        if (existing.length) await client.update('integrations', values, `?owner_id=eq.${encodeURIComponent(auth.user.id)}&provider=eq.google`);
+        else await client.insert('integrations', { owner_id: auth.user.id, provider: 'google', ...values });
+      }
       const token = sessionToken(auth.user.id); sessions.set(token, auth.user.id);
       await ensureSupabaseSchedulingProfile(client, auth.user);
-      res.setHeader('Set-Cookie', [sessionCookie(token), clearPkceVerifierCookie(config.isProduction)]);
+      res.setHeader('Set-Cookie', [sessionCookie(token), clearPkceVerifierCookie(config.isProduction), `calpro_calendar_connect=; HttpOnly; SameSite=Lax; Path=/api/auth/google/callback; Max-Age=0${config.isProduction ? '; Secure' : ''}`]);
       return res.redirect('/');
     }
     if (req.path === '/api/auth/register' && req.method === 'POST') {
@@ -233,6 +257,7 @@ app.use(async (req, res, next) => {
     if (config.useSupabase && req.path.startsWith('/api/')) {
       const supportedMutation =
         (req.method === 'PUT' && req.path === '/api/availability') ||
+        (req.method === 'PUT' && req.path === '/api/notification-preferences') ||
         (req.method === 'POST' && req.path === '/api/availability/overrides') ||
         (req.method === 'PATCH' && /^\/api\/availability\/overrides\/[^/]+$/.test(req.path)) ||
         (req.method === 'DELETE' && /^\/api\/availability\/overrides\/[^/]+$/.test(req.path)) ||
@@ -242,6 +267,59 @@ app.use(async (req, res, next) => {
     }
     next();
   } catch (error) { return res.status(503).json({ error: 'Unable to save data to Supabase.', detail: error.message }); }
+});
+app.get('/api/notification-preferences', requireAuth, async (req, res) => {
+  try {
+    if (!config.useSupabase) {
+      const channels = String(readData().availability?.notifications ?? 'email').split(',');
+      return res.json({ email: channels.includes('email'), whatsapp: channels.includes('whatsapp'), sms: channels.includes('sms') });
+    }
+    const rows = await supabaseClient.list('notification_preferences', `?owner_id=eq.${encodeURIComponent(req.userId)}&select=email,whatsapp,sms&limit=1`);
+    res.json(rows[0] || { email: true, whatsapp: false, sms: false });
+  } catch { res.status(503).json({ error: 'Notification preferences are unavailable.' }); }
+});
+app.put('/api/notification-preferences', requireAuth, async (req, res) => {
+  try {
+    const values = { email: req.body?.email === true, whatsapp: false, sms: false };
+    if (!config.useSupabase) {
+      const data = readData(); data.availability.notifications = values.email ? 'email' : ''; writeData(data);
+      return res.json(values);
+    }
+    const query = `?owner_id=eq.${encodeURIComponent(req.userId)}`;
+    const existing = await supabaseClient.list('notification_preferences', `${query}&select=owner_id&limit=1`);
+    if (existing.length) await supabaseClient.update('notification_preferences', { ...values, updated_at: new Date().toISOString() }, query);
+    else await supabaseClient.insert('notification_preferences', { owner_id: req.userId, ...values });
+    res.json(values);
+  } catch { res.status(503).json({ error: 'Notification preferences could not be saved.' }); }
+});
+app.get('/api/integrations/google-calendar/status', requireAuth, async (req, res) => {
+  try {
+    if (!config.useSupabase) return res.json({ connected: Boolean(readData().integrations?.googleCalendar) });
+    const rows = await supabaseClient.list('integrations', `?owner_id=eq.${encodeURIComponent(req.userId)}&provider=eq.google&select=access_token_encrypted&limit=1`);
+    res.json({ connected: Boolean(rows[0]?.access_token_encrypted) });
+  } catch { res.status(503).json({ error: 'Calendar connection status is unavailable.' }); }
+});
+app.get('/api/integrations/google-calendar/events', requireAuth, async (req, res) => {
+  try {
+    if (!config.useSupabase) return res.status(409).json({ error: 'Google Calendar is not connected.' });
+    const query = `?owner_id=eq.${encodeURIComponent(req.userId)}&provider=eq.google&select=access_token_encrypted,refresh_token_encrypted,expires_at&limit=1`;
+    const rows = await supabaseClient.list('integrations', query);
+    const row = rows[0];
+    if (!row?.access_token_encrypted) return res.status(409).json({ error: 'Google Calendar is not connected.' });
+    let accessToken = open(row.access_token_encrypted, config.tokenEncryptionKey);
+    if (row.expires_at && Date.parse(row.expires_at) < Date.now() + 60_000) {
+      if (!row.refresh_token_encrypted) return res.status(409).json({ error: 'Reconnect Google Calendar to refresh access.' });
+      const refreshToken = open(row.refresh_token_encrypted, config.tokenEncryptionKey);
+      const params = new URLSearchParams({ client_id: config.googleClientId, client_secret: config.googleClientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' });
+      const refreshed = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params });
+      if (!refreshed.ok) return res.status(409).json({ error: 'Reconnect Google Calendar to refresh access.' });
+      const body = await refreshed.json(); accessToken = body.access_token;
+      await supabaseClient.update('integrations', { access_token_encrypted: seal(accessToken, config.tokenEncryptionKey), expires_at: new Date(Date.now() + Number(body.expires_in || 3600) * 1000).toISOString() }, `?owner_id=eq.${encodeURIComponent(req.userId)}&provider=eq.google`);
+    }
+    const google = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=10&timeMin=' + encodeURIComponent(new Date().toISOString()), { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!google.ok) return res.status(502).json({ error: 'Google Calendar could not be read. Reconnect it if permission was revoked.' });
+    const body = await google.json(); res.json({ events: body.items || [] });
+  } catch { res.status(503).json({ error: 'Google Calendar is temporarily unavailable.' }); }
 });
 app.get('/api/state', async (req, res) => { try { const userId = currentUser(req); if (!userId) return res.status(401).json({ error: 'Authentication required.' }); if (config.useSupabase) { const d = await supabaseState.publicState(userId); const profile = await persistence.getProfileByOwner(userId); const meetingTypes = await persistence.listMeetingTypes(userId); const availability = await persistence.getAvailability(userId); const rows = await bookingService.listOwnerBookings(userId); const bookings = rows.map(row => bookingView(row, meetingTypes, availability.schedule?.timezone || profile?.timezone || 'UTC')); return res.json({ ...d, profile: profile || {}, meetingTypes, availability, bookings }); } const d = readData(); const availability = await persistence.getAvailability(userId); const bookings = await bookingService.listOwnerBookings(userId); const safeBookings = bookings.map(row => bookingView(row, d.meetingTypes || [], d.profile?.timezone || 'UTC')); const { bookings: _ignored, ...safeState } = d; res.json({ ...safeState, bookings: safeBookings, availability }); } catch { res.status(503).json({ error: 'Persistence is unavailable.' }); } });
 app.get('/api/health', (req, res) => { const d = config.persistenceBackend === 'sqlite' ? readData() : null; res.json({ status: 'ok', service: 'calpro', database: { backend: config.persistenceBackend, status: config.useSupabase ? 'configured' : 'connected' }, googleCalendar: Boolean(d?.integrations?.googleCalendar), timestamp: new Date().toISOString() }); });

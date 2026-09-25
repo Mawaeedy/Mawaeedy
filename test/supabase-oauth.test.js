@@ -65,7 +65,7 @@ test('OAuth callback session cookie authenticates statelessly on a later serverl
 
   const server = fs.readFileSync('server.js', 'utf8');
   assert.match(server, /const token = sessionToken\(auth\.user\.id\); sessions\.set\(token, auth\.user\.id\);/);
-  assert.match(server, /res\.setHeader\('Set-Cookie', \[sessionCookie\(token\), clearPkceVerifierCookie\(config\.isProduction\)\]\)/);
+  assert.match(server, /res\.setHeader\('Set-Cookie', \[sessionCookie\(token\), clearPkceVerifierCookie\(config\.isProduction\),/);
   assert.match(server, /function currentUser\(req\)[\s\S]*sessions\.get\(token\) \|\| sessionUser\(token\)/);
   assert.match(server, /if \(req\.path === '\/api\/auth\/me' && req\.method === 'GET'\)[\s\S]*currentUser\(req\)/);
 });

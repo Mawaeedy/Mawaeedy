@@ -37,7 +37,7 @@ async function publicState(ownerId = null, slug = null) {
   const availabilityMap = {};
   for (const row of availability) availabilityMap[dayName(row.day_of_week)] = parseHours(row);
   const integrationMap = {};
-  for (const row of integrations) integrationMap[row.provider] = Boolean(row.connected);
+  for (const row of integrations) if (row.provider === 'google') integrationMap.googleCalendar = Boolean(row.access_token_encrypted);
   return {
     profile: {
       name: profile.name || 'مواعيدي',
